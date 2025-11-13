@@ -1,0 +1,14 @@
+name = "chat-worker"
+main = "worker/src/index.ts"
+compatibility_date = "2024-11-13"
+
+[vars]
+# Environment variables (use wrangler secret put for sensitive values in production)
+
+[[durable_objects.bindings]]
+name = "CHAT_ROOM"
+class_name = "ChatRoom"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["ChatRoom"]
