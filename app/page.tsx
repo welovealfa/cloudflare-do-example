@@ -84,8 +84,10 @@ export default function ChatPage() {
     iteration: number;
     phase: string;
   } | null>(null);
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // WebSocket URL
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `ws://localhost:8787/default`;
@@ -407,7 +409,7 @@ export default function ChatPage() {
     }
   };
 
-  const sendMessage = useCallback((e: React.FormEvent) => {
+  const sendMessage = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
 
     if (!inputValue.trim() || !isConnected || isLoading) {
@@ -415,18 +417,37 @@ export default function ChatPage() {
     }
 
     try {
-      sendJsonMessage({
+      const messageData: any = {
         type: "message",
         content: inputValue,
-      });
+      };
+
+      // If there's an attached file, read it and include it
+      if (attachedFile) {
+        const reader = new FileReader();
+        const fileData = await new Promise<string>((resolve, reject) => {
+          reader.onload = () => resolve(reader.result as string);
+          reader.onerror = reject;
+          reader.readAsDataURL(attachedFile);
+        });
+
+        messageData.attachments = [{
+          name: attachedFile.name,
+          type: attachedFile.type,
+          data: fileData,
+        }];
+      }
+
+      sendJsonMessage(messageData);
 
       setInputValue("");
+      setAttachedFile(null);
       setIsLoading(true);
     } catch (error) {
       console.error('Failed to send message:', error);
       // Don't clear input on error so user can retry
     }
-  }, [inputValue, isConnected, isLoading, sendJsonMessage]);
+  }, [inputValue, attachedFile, isConnected, isLoading, sendJsonMessage]);
 
   const AgentLoopIndicator = ({ loopState }: { loopState: Message["agentLoopState"] }) => {
     // Don't show the indicator anymore
@@ -611,6 +632,23 @@ export default function ChatPage() {
     handleReset();
   };
 
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file && file.type === "application/pdf") {
+      setAttachedFile(file);
+    } else if (file) {
+      alert("Please select a PDF file only.");
+      e.target.value = "";
+    }
+  };
+
+  const removeAttachment = () => {
+    setAttachedFile(null);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  };
+
   return (
     <div className="chat-container">
       <div className="chat-header">
@@ -724,26 +762,58 @@ export default function ChatPage() {
         <div ref={messagesEndRef} />
       </div>
 
-      <form onSubmit={sendMessage} className="input-form">
-        <input
-          ref={inputRef}
-          type="text"
-          placeholder={isConnected ? "Ask Claude anything..." : "Connecting..."}
-          value={inputValue}
-          onChange={(e) => setInputValue(e.target.value)}
-          disabled={isLoading}
-          autoFocus
-          onKeyDown={(e) => {
-            // Allow typing even when not connected - user can prepare message
-            if (e.key === 'Enter' && (!isConnected || isLoading)) {
-              e.preventDefault();
-            }
-          }}
-        />
-        <button type="submit" disabled={!inputValue.trim() || !isConnected || isLoading}>
-          {isLoading ? "Sending..." : "Send"}
-        </button>
-      </form>
+      <div className="input-area">
+        {attachedFile && (
+          <div className="attachment-preview">
+            <span className="attachment-icon">📄</span>
+            <span className="attachment-name">{attachedFile.name}</span>
+            <button
+              type="button"
+              onClick={removeAttachment}
+              className="remove-attachment"
+              title="Remove attachment"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+        <form onSubmit={sendMessage} className="input-form">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf"
+            onChange={handleFileSelect}
+            style={{ display: 'none' }}
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            className="attachment-button"
+            disabled={isLoading}
+            title="Attach PDF"
+          >
+            📎
+          </button>
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder={isConnected ? "Ask Claude anything..." : "Connecting..."}
+            value={inputValue}
+            onChange={(e) => setInputValue(e.target.value)}
+            disabled={isLoading}
+            autoFocus
+            onKeyDown={(e) => {
+              // Allow typing even when not connected - user can prepare message
+              if (e.key === 'Enter' && (!isConnected || isLoading)) {
+                e.preventDefault();
+              }
+            }}
+          />
+          <button type="submit" disabled={!inputValue.trim() || !isConnected || isLoading}>
+            {isLoading ? "Sending..." : "Send"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }

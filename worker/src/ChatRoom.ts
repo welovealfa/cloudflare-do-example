@@ -16,6 +16,8 @@ export interface SubTask {
 // Content blocks match Claude API structure
 type ContentBlock =
   | { type: "text"; text: string }
+  | { type: "document"; source: { type: "base64"; media_type: string; data: string } | { type: "file"; file_id: string }; title?: string; context?: string }
+  | { type: "image"; source: { type: "file"; file_id: string } }
   | { type: "tool_use"; id: string; name: string; input: unknown; status?: "running" | "complete" | "error"; result?: string; subTasks?: SubTask[] }
   | { type: "tool_result"; tool_use_id: string; content: string };
 
@@ -95,11 +97,46 @@ export class ChatRoom {
       const data = JSON.parse(message.toString());
 
       if (data.type === "message") {
+        // Build content blocks for user message
+        const contentBlocks: ContentBlock[] = [];
+
+        // Handle PDF attachments if present
+        if (data.attachments && data.attachments.length > 0) {
+          for (const attachment of data.attachments) {
+            if (attachment.type === "application/pdf") {
+              // Extract base64 data from data URL (remove "data:application/pdf;base64," prefix)
+              const base64Data = attachment.data.split(',')[1];
+
+              // Upload file to Anthropic and get file_id
+              const fileId = await this.uploadFileToAnthropic(
+                base64Data,
+                attachment.name,
+                attachment.type
+              );
+
+              // Add document content block with file_id reference
+              contentBlocks.push({
+                type: "document",
+                source: {
+                  type: "file",
+                  file_id: fileId
+                },
+                title: attachment.name
+              });
+            }
+          }
+        }
+
+        // Add user's text message
+        if (data.content && data.content.trim()) {
+          contentBlocks.push({ type: "text", text: data.content });
+        }
+
         // Store user message
         const userMessage: Message = {
           id: crypto.randomUUID(),
           role: "user",
-          content: [{ type: "text", text: data.content }],
+          content: contentBlocks,
           timestamp: Date.now()
         };
 
@@ -148,6 +185,45 @@ export class ChatRoom {
   // Helper: Save messages to storage
   private async saveMessages() {
     await this.state.storage.put("messages", this.messages);
+  }
+
+  // Helper: Upload file to Anthropic API
+  private async uploadFileToAnthropic(base64Data: string, fileName: string, mediaType: string): Promise<string> {
+    try {
+      // Convert base64 to binary data
+      const binaryString = atob(base64Data);
+      const bytes = new Uint8Array(binaryString.length);
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+
+      // Create form data
+      const formData = new FormData();
+      formData.append('file', new Blob([bytes], { type: mediaType }), fileName);
+      formData.append('purpose', 'input');
+
+      // Upload to Anthropic
+      const response = await fetch('https://api.anthropic.com/v1/files', {
+        method: 'POST',
+        headers: {
+          'x-api-key': this.env.ANTHROPIC_API_KEY,
+          'anthropic-version': CONFIG.ANTHROPIC_VERSION,
+          'anthropic-beta': 'files-api-2025-04-14'
+        },
+        body: formData
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`File upload failed: ${response.status} ${errorText}`);
+      }
+
+      const result = await response.json() as { id: string };
+      return result.id;
+    } catch (error) {
+      console.error('Error uploading file to Anthropic:', error);
+      throw error;
+    }
   }
 
   // Helper: Create a new assistant message
@@ -424,7 +500,8 @@ export class ChatRoom {
           headers: {
             "Content-Type": "application/json",
             "x-api-key": this.env.ANTHROPIC_API_KEY,
-            "anthropic-version": CONFIG.ANTHROPIC_VERSION
+            "anthropic-version": CONFIG.ANTHROPIC_VERSION,
+            "anthropic-beta": "files-api-2025-04-14"
           },
           body: JSON.stringify({
             model: CONFIG.MODEL,

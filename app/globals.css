@@ -558,6 +558,74 @@ body {
     box-shadow: 0 4px 12px rgba(220, 53, 69, 0.4);
 }
 
+/* Input Area and Attachment Styles */
+.input-area {
+    background: white;
+    border-top: 1px solid #e0e0e0;
+}
+
+.attachment-preview {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.75rem 1.5rem;
+    background: #f9fafb;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.attachment-icon {
+    font-size: 1.25rem;
+}
+
+.attachment-name {
+    flex: 1;
+    font-size: 0.875rem;
+    color: #374151;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.remove-attachment {
+    background: transparent;
+    border: none;
+    color: #9ca3af;
+    font-size: 1.25rem;
+    cursor: pointer;
+    padding: 0.25rem;
+    line-height: 1;
+    transition: color 0.2s;
+}
+
+.remove-attachment:hover {
+    color: #ef4444;
+}
+
+.attachment-button {
+    background: transparent;
+    border: 1px solid #d1d5db;
+    color: #6b7280;
+    padding: 0.875rem 1rem;
+    border-radius: 26px;
+    font-size: 1.25rem;
+    cursor: pointer;
+    transition: all 0.2s;
+    line-height: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.attachment-button:hover:not(:disabled) {
+    background: #f9fafb;
+    border-color: #9ca3af;
+}
+
+.attachment-button:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 /* Responsive Design */
 @media (max-width: 768px) {
     .chat-header {
@@ -605,6 +673,10 @@ body {
 
     .input-form button {
         padding: 1rem 1.25rem;
+    }
+
+    .attachment-preview {
+        padding: 0.5rem 1rem;
     }
 
     .confirm-modal {

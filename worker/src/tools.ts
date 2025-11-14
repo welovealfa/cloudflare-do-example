@@ -123,7 +123,7 @@ const validateSumTool: Tool = {
             subTasks[i].status = "running";
             if (onProgress) {
                 onProgress([...subTasks]);
-            }tools: Map<string, Tool>, toolName: string, toolInput: any, onProgress: (subTasks: SubTask[]) => void
+            }
 
             // Simulate work (1.25 seconds per step)
             await new Promise(resolve => setTimeout(resolve, 1250));
