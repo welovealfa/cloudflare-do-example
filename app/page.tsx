@@ -578,9 +578,11 @@ export default function ChatPage() {
                 )}
                 {msg.toolUses && msg.toolUses.length > 0 && (
                   <div className="tool-uses-container">
-                    {msg.toolUses.map((toolUse) => (
-                      <ToolUseCard key={toolUse.id} toolUse={toolUse} />
-                    ))}
+                    {msg.toolUses
+                      .filter((toolUse) => toolUse.status === "complete" || toolUse.status === "error")
+                      .map((toolUse) => (
+                        <ToolUseCard key={toolUse.id} toolUse={toolUse} />
+                      ))}
                   </div>
                 )}
                 {msg.role === "assistant" && msg.agentLoopState?.validationResults && (

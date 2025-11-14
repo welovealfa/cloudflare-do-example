@@ -1,4 +1,5 @@
 import type { DurableObjectNamespace, DurableObjectState, WebSocket as CloudflareWebSocket } from "@cloudflare/workers-types";
+import { createToolRegistry, getToolDefinitions, executeTool, checkAutoInjectValidation, type Tool } from "./tools";
 
 declare const WebSocketPair: {
   new (): { 0: CloudflareWebSocket; 1: CloudflareWebSocket };
@@ -44,12 +45,14 @@ export class ChatRoom {
   private messages: Message[];
   private state: DurableObjectState;
   private env: Env;
+  private tools: Map<string, Tool>;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
     this.sessions = new Set();
     this.messages = [];
+    this.tools = createToolRegistry();
 
     // Block concurrent inputs until the initialization completes
     this.state.blockConcurrencyWhile(async () => {
@@ -97,7 +100,7 @@ export class ChatRoom {
         };
 
         this.messages.push(userMessage);
-        await this.state.storage.put("messages", this.messages);
+        await this.saveMessages();
 
         // Broadcast user message
         this.broadcast(JSON.stringify({
@@ -106,16 +109,9 @@ export class ChatRoom {
         }));
 
         // Create placeholder for assistant response
-        const assistantMessageId = crypto.randomUUID();
-        const assistantMessage: Message = {
-          id: assistantMessageId,
-          role: "assistant",
-          content: "",
-          timestamp: Date.now()
-        };
-
+        const assistantMessage = this.createAssistantMessage();
         this.messages.push(assistantMessage);
-        await this.state.storage.put("messages", this.messages);
+        await this.saveMessages();
 
         // Broadcast placeholder
         this.broadcast(JSON.stringify({
@@ -124,11 +120,11 @@ export class ChatRoom {
         }));
 
         // Get AI response
-        await this.getAIResponse(assistantMessageId);
+        await this.getAIResponse(assistantMessage.id);
       } else if (data.type === "reset") {
         // Clear all messages
         this.messages = [];
-        await this.state.storage.put("messages", this.messages);
+        await this.saveMessages();
 
         // Broadcast reset to all connected clients
         this.broadcast(JSON.stringify({
@@ -144,102 +140,70 @@ export class ChatRoom {
     }
   }
 
-  // Get tool definitions for Claude
-  private getToolDefinitions() {
-    return [
-      {
-        name: "calculator",
-        description: "A simple calculator that can perform basic arithmetic operations (add, subtract, multiply, divide). Use this when you need to perform exact calculations.",
-        input_schema: {
-          type: "object",
-          properties: {
-            operation: {
-              type: "string",
-              enum: ["add", "subtract", "multiply", "divide"],
-              description: "The mathematical operation to perform"
-            },
-            a: {
-              type: "number",
-              description: "The first number"
-            },
-            b: {
-              type: "number",
-              description: "The second number"
-            }
-          },
-          required: ["operation", "a", "b"]
-        }
-      },
-      {
-        name: "validate_sum",
-        description: "Validates that a sum (addition) calculation is correct by checking the inputs and expected result.",
-        input_schema: {
-          type: "object",
-          properties: {
-            a: {
-              type: "number",
-              description: "The first number in the sum"
-            },
-            b: {
-              type: "number",
-              description: "The second number in the sum"
-            },
-            expected_result: {
-              type: "number",
-              description: "The expected result of a + b"
-            }
-          },
-          required: ["a", "b", "expected_result"]
-        }
-      }
-    ];
+  // Helper: Save messages to storage
+  private async saveMessages() {
+    await this.state.storage.put("messages", this.messages);
   }
 
-  // Simple calculator tool
-  calculate(operation: string, a: number, b: number): number {
-    switch (operation) {
-      case "add": return a + b;
-      case "subtract": return a - b;
-      case "multiply": return a * b;
-      case "divide": return b !== 0 ? a / b : NaN;
-      default: throw new Error(`Unknown operation: ${operation}`);
+  // Helper: Create a new assistant message
+  private createAssistantMessage(content: string = "", toolUses?: ToolUse[]): Message {
+    const message: Message = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content,
+      timestamp: Date.now()
+    };
+
+    if (toolUses && toolUses.length > 0) {
+      message.toolUses = toolUses;
     }
+
+    return message;
   }
 
-  // Validation tool for sum operations
-  validateSum(a: number, b: number, expectedResult: number): { isValid: boolean; message: string } {
-    const actualResult = a + b;
-    const isValid = actualResult === expectedResult;
+  // Helper: Broadcast message update with content
+  private broadcastMessageUpdate(messageId: string, content: string, iteration?: number) {
+    const payload: any = {
+      type: "update",
+      messageId,
+      content
+    };
 
-    if (isValid) {
-      return {
-        isValid: true,
-        message: `✓ Validation passed: ${a} + ${b} = ${expectedResult} is correct`
-      };
-    } else {
-      return {
-        isValid: false,
-        message: `✗ Validation failed: ${a} + ${b} = ${actualResult}, but expected ${expectedResult}`
-      };
+    if (iteration !== undefined) {
+      payload.iteration = iteration;
     }
+
+    this.broadcast(JSON.stringify(payload));
   }
 
-  // Execute a single tool
-  private async executeTool(toolName: string, toolInput: any): Promise<string> {
-    try {
-      switch (toolName) {
-        case "calculator":
-          const result = this.calculate(toolInput.operation, toolInput.a, toolInput.b);
-          return `The result of ${toolInput.a} ${toolInput.operation} ${toolInput.b} is ${result}`;
-        case "validate_sum":
-          const validation = this.validateSum(toolInput.a, toolInput.b, toolInput.expected_result);
-          return validation.message;
-        default:
-          throw new Error(`Unknown tool: ${toolName}`);
-      }
-    } catch (error) {
-      return `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+  // Helper: Broadcast tool use status
+  private broadcastToolUse(messageId: string, toolUse: Partial<ToolUse>, iteration?: number) {
+    const payload: any = {
+      type: "tool_use",
+      messageId,
+      toolUse
+    };
+
+    if (iteration !== undefined) {
+      payload.iteration = iteration;
     }
+
+    this.broadcast(JSON.stringify(payload));
+  }
+
+  // Helper: Broadcast message completion
+  private broadcastCompletion(messageId: string, content: string, totalIterations?: number) {
+    const payload: any = {
+      type: "complete",
+      messageId,
+      content
+    };
+
+    if (totalIterations !== undefined) {
+      payload.totalIterations = totalIterations;
+    }
+
+    this.broadcast(JSON.stringify(payload));
   }
 
   async getAIResponse(messageId: string) {
@@ -267,7 +231,7 @@ export class ChatRoom {
         }));
 
       // Get tool definitions
-      const tools = this.getToolDefinitions();
+      const tools = getToolDefinitions(this.tools);
 
       let shouldContinue = true;
 
@@ -358,12 +322,7 @@ export class ChatRoom {
                       this.messages[messageIndex].content = iterationContent;
 
                       // Broadcast update (don't wait for storage on every update)
-                      this.broadcast(JSON.stringify({
-                        type: "update",
-                        messageId: currentMessageId,
-                        content: iterationContent,
-                        iteration: agentState.iteration
-                      }));
+                      this.broadcastMessageUpdate(currentMessageId, iterationContent, agentState.iteration);
                     }
                   }
                   // Handle tool use start
@@ -386,16 +345,11 @@ export class ChatRoom {
                       });
 
                       // Broadcast tool use started
-                      this.broadcast(JSON.stringify({
-                        type: "tool_use",
-                        messageId: currentMessageId,
-                        iteration: agentState.iteration,
-                        toolUse: {
-                          id: currentToolUse.id,
-                          name: currentToolUse.name,
-                          status: "running"
-                        }
-                      }));
+                      this.broadcastToolUse(currentMessageId, {
+                        id: currentToolUse.id,
+                        name: currentToolUse.name,
+                        status: "running"
+                      }, agentState.iteration);
                     }
                   }
                   // Handle tool input accumulation
@@ -434,57 +388,26 @@ export class ChatRoom {
           }
         }
 
-        // Automatically inject validation tool uses for addition operations
+        // Automatically inject validation tool uses where applicable
         const validationToolUses: Array<{ id: string; name: string; input: any }> = [];
-        const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
 
         for (const toolUse of toolUsesInThisIteration) {
-          if (toolUse.name === "calculator" && toolUse.input.operation === "add") {
-            const calculatedResult = this.calculate(toolUse.input.operation, toolUse.input.a, toolUse.input.b);
+          const validationCheck = checkAutoInjectValidation(this.tools, toolUse.name, toolUse.input);
+
+          if (validationCheck && validationCheck.shouldInject && validationCheck.validationToolName) {
             const validationToolUse = {
               id: crypto.randomUUID(),
-              name: "validate_sum",
-              input: {
-                a: toolUse.input.a,
-                b: toolUse.input.b,
-                expected_result: calculatedResult
-              }
+              name: validationCheck.validationToolName,
+              input: validationCheck.validationInput
             };
 
-            console.log(`[Iteration ${agentState.iteration}] Auto-injecting validation for sum: ${toolUse.input.a} + ${toolUse.input.b} = ${calculatedResult}`);
+            console.log(`[Iteration ${agentState.iteration}] Auto-injecting validation for ${toolUse.name} with input:`, toolUse.input);
 
             validationToolUses.push(validationToolUse);
-
-            // Add validation tool use to message with "running" status
-            if (messageIndex !== -1) {
-              if (!this.messages[messageIndex].toolUses) {
-                this.messages[messageIndex].toolUses = [];
-              }
-              this.messages[messageIndex].toolUses!.push({
-                id: validationToolUse.id,
-                name: "validate_sum",
-                input: validationToolUse.input,
-                result: null,
-                status: "running"
-              });
-
-              // Broadcast validation tool started
-              this.broadcast(JSON.stringify({
-                type: "tool_use",
-                messageId: currentMessageId,
-                iteration: agentState.iteration,
-                toolUse: {
-                  id: validationToolUse.id,
-                  name: "validate_sum",
-                  input: validationToolUse.input,
-                  status: "running"
-                }
-              }));
-            }
           }
         }
 
-        // Add validation tool uses to the iteration
+        // Add validation tool uses to the iteration (but don't add to message or broadcast yet)
         toolUsesInThisIteration.push(...validationToolUses);
 
         // Add the assistant's response to conversation history
@@ -523,27 +446,15 @@ export class ChatRoom {
           // If current message has text content, finalize it before executing tools
           const currentMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
           if (currentMsgIndex !== -1 && iterationContent && iterationContent.trim()) {
-            await this.state.storage.put("messages", this.messages);
+            await this.saveMessages();
 
             // Broadcast completion of text message
-            this.broadcast(JSON.stringify({
-              type: "complete",
-              messageId: currentMessageId,
-              content: this.messages[currentMsgIndex].content
-            }));
+            this.broadcastCompletion(currentMessageId, this.messages[currentMsgIndex].content);
 
             // Create new message for tool execution
-            const toolMessageId = crypto.randomUUID();
-            const toolMessage: Message = {
-              id: toolMessageId,
-              role: "assistant",
-              content: "",
-              timestamp: Date.now(),
-              toolUses: []
-            };
-
+            const toolMessage = this.createAssistantMessage("", []);
             this.messages.push(toolMessage);
-            await this.state.storage.put("messages", this.messages);
+            await this.saveMessages();
 
             // Broadcast new tool message
             this.broadcast(JSON.stringify({
@@ -552,7 +463,7 @@ export class ChatRoom {
             }));
 
             // Update currentMessageId to the tool message
-            currentMessageId = toolMessageId;
+            currentMessageId = toolMessage.id;
 
             // Move tool uses to new message
             const oldMessageToolUses = this.messages[currentMsgIndex].toolUses || [];
@@ -564,17 +475,12 @@ export class ChatRoom {
 
               // Re-broadcast all tool uses with new messageId
               for (const toolUse of oldMessageToolUses) {
-                this.broadcast(JSON.stringify({
-                  type: "tool_use",
-                  messageId: currentMessageId,
-                  iteration: agentState.iteration,
-                  toolUse: {
-                    id: toolUse.id,
-                    name: toolUse.name,
-                    input: toolUse.input,
-                    status: toolUse.status
-                  }
-                }));
+                this.broadcastToolUse(currentMessageId, {
+                  id: toolUse.id,
+                  name: toolUse.name,
+                  input: toolUse.input,
+                  status: toolUse.status
+                }, agentState.iteration);
               }
             }
           }
@@ -589,27 +495,15 @@ export class ChatRoom {
             if (toolIndex > 0) {
               const currentMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
               if (currentMsgIndex !== -1) {
-                await this.state.storage.put("messages", this.messages);
+                await this.saveMessages();
 
                 // Broadcast completion of previous tool message
-                this.broadcast(JSON.stringify({
-                  type: "complete",
-                  messageId: currentMessageId,
-                  content: this.messages[currentMsgIndex].content
-                }));
+                this.broadcastCompletion(currentMessageId, this.messages[currentMsgIndex].content);
 
                 // Create new message for this tool
-                const newToolMessageId = crypto.randomUUID();
-                const newToolMessage: Message = {
-                  id: newToolMessageId,
-                  role: "assistant",
-                  content: "",
-                  timestamp: Date.now(),
-                  toolUses: []
-                };
-
+                const newToolMessage = this.createAssistantMessage("", []);
                 this.messages.push(newToolMessage);
-                await this.state.storage.put("messages", this.messages);
+                await this.saveMessages();
 
                 // Broadcast new message
                 this.broadcast(JSON.stringify({
@@ -618,9 +512,9 @@ export class ChatRoom {
                 }));
 
                 // Update currentMessageId
-                currentMessageId = newToolMessageId;
+                currentMessageId = newToolMessage.id;
 
-                // Move this tool use to the new message
+                // Check if tool already exists in old message (e.g., calculator from streaming)
                 const oldMsgToolUse = this.messages[currentMsgIndex].toolUses!.find(t => t.id === toolUse.id);
                 if (oldMsgToolUse) {
                   // Remove from old message
@@ -632,24 +526,48 @@ export class ChatRoom {
                     this.messages[newMsgIndex].toolUses!.push(oldMsgToolUse);
 
                     // Re-broadcast with new messageId
-                    this.broadcast(JSON.stringify({
-                      type: "tool_use",
-                      messageId: currentMessageId,
-                      iteration: agentState.iteration,
-                      toolUse: {
-                        id: oldMsgToolUse.id,
-                        name: oldMsgToolUse.name,
-                        input: oldMsgToolUse.input,
-                        status: oldMsgToolUse.status
-                      }
-                    }));
+                    this.broadcastToolUse(currentMessageId, {
+                      id: oldMsgToolUse.id,
+                      name: oldMsgToolUse.name,
+                      input: oldMsgToolUse.input,
+                      status: oldMsgToolUse.status
+                    }, agentState.iteration);
                   }
                 }
               }
             }
 
+            // Ensure tool use exists in current message before execution
+            const msgIndex = this.messages.findIndex(m => m.id === currentMessageId);
+            if (msgIndex !== -1) {
+              if (!this.messages[msgIndex].toolUses) {
+                this.messages[msgIndex].toolUses = [];
+              }
+
+              // Check if this tool already exists
+              const existingToolIndex = this.messages[msgIndex].toolUses!.findIndex(t => t.id === toolUse.id);
+              if (existingToolIndex === -1) {
+                // Tool doesn't exist yet (e.g., validation tool), add it now
+                this.messages[msgIndex].toolUses!.push({
+                  id: toolUse.id,
+                  name: toolUse.name,
+                  input: toolUse.input,
+                  result: null,
+                  status: "running"
+                });
+
+                // Broadcast tool use started
+                this.broadcastToolUse(currentMessageId, {
+                  id: toolUse.id,
+                  name: toolUse.name,
+                  input: toolUse.input,
+                  status: "running"
+                }, agentState.iteration);
+              }
+            }
+
             try {
-              const result = await this.executeTool(toolUse.name, toolUse.input);
+              const result = await executeTool(this.tools, toolUse.name, toolUse.input);
 
               // Update tool use with result
               const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
@@ -661,18 +579,13 @@ export class ChatRoom {
                   this.messages[messageIndex].toolUses![toolUseIndex].status = "complete";
 
                   // Broadcast tool use completed
-                  this.broadcast(JSON.stringify({
-                    type: "tool_use",
-                    messageId: currentMessageId,
-                    iteration: agentState.iteration,
-                    toolUse: {
-                      id: toolUse.id,
-                      name: toolUse.name,
-                      input: toolUse.input,
-                      result: result,
-                      status: "complete"
-                    }
-                  }));
+                  this.broadcastToolUse(currentMessageId, {
+                    id: toolUse.id,
+                    name: toolUse.name,
+                    input: toolUse.input,
+                    result: result,
+                    status: "complete"
+                  }, agentState.iteration);
                 }
               }
 
@@ -691,16 +604,11 @@ export class ChatRoom {
                 const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
                 if (toolUseIndex !== -1) {
                   this.messages[messageIndex].toolUses![toolUseIndex].status = "error";
-                  this.broadcast(JSON.stringify({
-                    type: "tool_use",
-                    messageId: currentMessageId,
-                    iteration: agentState.iteration,
-                    toolUse: {
-                      id: toolUse.id,
-                      name: toolUse.name,
-                      status: "error"
-                    }
-                  }));
+                  this.broadcastToolUse(currentMessageId, {
+                    id: toolUse.id,
+                    name: toolUse.name,
+                    status: "error"
+                  }, agentState.iteration);
                 }
               }
 
@@ -716,27 +624,16 @@ export class ChatRoom {
           // Finalize current message
           const finalMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
           if (finalMsgIndex !== -1) {
-            await this.state.storage.put("messages", this.messages);
+            await this.saveMessages();
 
             // Broadcast completion of current message
-            this.broadcast(JSON.stringify({
-              type: "complete",
-              messageId: currentMessageId,
-              content: this.messages[finalMsgIndex].content
-            }));
+            this.broadcastCompletion(currentMessageId, this.messages[finalMsgIndex].content);
           }
 
           // Create new message for next iteration
-          const newMessageId = crypto.randomUUID();
-          const newMessage: Message = {
-            id: newMessageId,
-            role: "assistant",
-            content: "",
-            timestamp: Date.now()
-          };
-
+          const newMessage = this.createAssistantMessage();
           this.messages.push(newMessage);
-          await this.state.storage.put("messages", this.messages);
+          await this.saveMessages();
 
           // Broadcast new message
           this.broadcast(JSON.stringify({
@@ -745,7 +642,7 @@ export class ChatRoom {
           }));
 
           // Update currentMessageId for next iteration
-          currentMessageId = newMessageId;
+          currentMessageId = newMessage.id;
 
           // Continue to next iteration with tool results
           shouldContinue = true;
@@ -764,14 +661,9 @@ export class ChatRoom {
       // **LOOP COMPLETE** - Save final state and broadcast completion
       const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
       if (messageIndex !== -1) {
-        await this.state.storage.put("messages", this.messages);
+        await this.saveMessages();
 
-        this.broadcast(JSON.stringify({
-          type: "complete",
-          messageId: currentMessageId,
-          content: this.messages[messageIndex].content,
-          totalIterations: agentState.iteration
-        }));
+        this.broadcastCompletion(currentMessageId, this.messages[messageIndex].content, agentState.iteration);
       }
 
     } catch (error) {
@@ -781,7 +673,7 @@ export class ChatRoom {
       const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
       if (messageIndex !== -1) {
         this.messages[messageIndex].content = "Sorry, I encountered an error processing your request.";
-        await this.state.storage.put("messages", this.messages);
+        await this.saveMessages();
 
         this.broadcast(JSON.stringify({
           type: "error",
