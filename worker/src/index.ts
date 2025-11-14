@@ -1,3 +1,9 @@
+import type { DurableObjectNamespace, DurableObjectState, WebSocket as CloudflareWebSocket } from "@cloudflare/workers-types";
+
+declare const WebSocketPair: {
+  new (): { 0: CloudflareWebSocket; 1: CloudflareWebSocket };
+};
+
 export interface Env {
   CHAT_ROOM: DurableObjectNamespace;
   ANTHROPIC_API_KEY: string;
@@ -19,8 +25,8 @@ interface ToolUse {
   status: "running" | "complete" | "error";
 }
 
-export class ChatRoom implements DurableObject {
-  private sessions: Set<WebSocket>;
+export class ChatRoom {
+  private sessions: Set<CloudflareWebSocket>;
   private messages: Message[];
   private state: DurableObjectState;
   private env: Env;
@@ -60,10 +66,10 @@ export class ChatRoom implements DurableObject {
     return new Response(null, {
       status: 101,
       webSocket: client,
-    });
+    } as ResponseInit);
   }
 
-  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
+  async webSocketMessage(ws: CloudflareWebSocket, message: string | ArrayBuffer) {
     try {
       const data = JSON.parse(message.toString());
 
@@ -202,9 +208,6 @@ export class ChatRoom implements DurableObject {
       const reader = response.body?.getReader();
       const decoder = new TextDecoder();
       let accumulatedContent = "";
-      let updateCounter = 0;
-      const BROADCAST_INTERVAL = 3; // Broadcast every N chunks to reduce overhead
-      let isFirstChunk = true;
       let buffer = ""; // Buffer for incomplete lines
       let toolUse: any = null; // Track tool use blocks
       let toolInput = ""; // Accumulate tool input JSON
@@ -238,25 +241,17 @@ export class ChatRoom implements DurableObject {
                 // Handle text content
                 if (parsed.type === "content_block_delta" && parsed.delta?.text) {
                   accumulatedContent += parsed.delta.text;
-                  updateCounter++;
 
-                  // Always send first chunk immediately, then throttle
-                  const shouldBroadcast = isFirstChunk || (updateCounter % BROADCAST_INTERVAL === 0);
+                  const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                  if (messageIndex !== -1) {
+                    this.messages[messageIndex].content = accumulatedContent;
 
-                  if (shouldBroadcast) {
-                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
-                    if (messageIndex !== -1) {
-                      this.messages[messageIndex].content = accumulatedContent;
-
-                      // Broadcast update (don't wait for storage on every update)
-                      this.broadcast(JSON.stringify({
-                        type: "update",
-                        messageId: messageId,
-                        content: accumulatedContent
-                      }));
-
-                      isFirstChunk = false;
-                    }
+                    // Broadcast update (don't wait for storage on every update)
+                    this.broadcast(JSON.stringify({
+                      type: "update",
+                      messageId: messageId,
+                      content: accumulatedContent
+                    }));
                   }
                 }
                 // Handle tool use start
@@ -399,17 +394,17 @@ export class ChatRoom implements DurableObject {
     }
   }
 
-  async webSocketClose(ws: WebSocket, code: number, reason: string, wasClean: boolean) {
+  async webSocketClose(ws: CloudflareWebSocket, code: number, reason: string, wasClean: boolean) {
     this.sessions.delete(ws);
     ws.close(code, reason);
   }
 
-  async webSocketError(ws: WebSocket, error: unknown) {
+  async webSocketError(ws: CloudflareWebSocket, error: unknown) {
     console.error("WebSocket error:", error);
     this.sessions.delete(ws);
   }
 
-  private broadcast(message: string, exclude?: WebSocket) {
+  private broadcast(message: string, exclude?: CloudflareWebSocket) {
     for (const session of this.sessions) {
       if (session !== exclude) {
         try {
