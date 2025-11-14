@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import useWebSocket, { ReadyState } from "react-use-websocket";
 import { Streamdown } from "streamdown";
 
 interface ToolUse {
@@ -33,7 +34,6 @@ interface Message {
 export default function ChatPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputValue, setInputValue] = useState("");
-  const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   const [currentAgentState, setCurrentAgentState] = useState<{
@@ -41,40 +41,83 @@ export default function ChatPage() {
     iteration: number;
     phase: string;
   } | null>(null);
-  const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Throttling refs for streaming updates
+  const pendingUpdatesRef = useRef<Map<string, string>>(new Map());
+  const updateTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // WebSocket URL
+  const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `ws://localhost:8787/default`;
+
+  // Use WebSocket hook
+  const { sendJsonMessage, lastMessage, readyState } = useWebSocket(wsUrl, {
+    shouldReconnect: () => true,
+    reconnectAttempts: 10,
+    reconnectInterval: 3000,
+  });
+
+  const isConnected = readyState === ReadyState.OPEN;
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   };
 
+  // Throttled scroll - only scroll once every 100ms
+  const scrollTimerRef = useRef<NodeJS.Timeout | null>(null);
   useEffect(() => {
-    scrollToBottom();
+    if (scrollTimerRef.current) {
+      clearTimeout(scrollTimerRef.current);
+    }
+    scrollTimerRef.current = setTimeout(scrollToBottom, 100);
+    return () => {
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current);
+      }
+    };
   }, [messages]);
 
-  useEffect(() => {
-    // Auto-connect on mount
-    connect();
+  // Flush all pending streaming updates
+  const flushPendingUpdates = useCallback(() => {
+    if (pendingUpdatesRef.current.size === 0) return;
 
-    return () => {
-      disconnect();
-    };
+    const updates = new Map(pendingUpdatesRef.current);
+    pendingUpdatesRef.current.clear();
+
+    setMessages((prev) => {
+      const updated = [...prev];
+      updates.forEach((content, messageId) => {
+        const index = updated.findIndex(m => m.id === messageId);
+        if (index !== -1) {
+          updated[index] = {
+            ...updated[index],
+            content
+          };
+        }
+      });
+      return updated;
+    });
   }, []);
 
-  const connect = () => {
-    // Connect to the Cloudflare Worker
-    // In development: ws://localhost:8787/default
-    // In production: wss://your-worker.workers.dev/default
-    const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `ws://localhost:8787/default`;
-    const ws = new WebSocket(wsUrl);
+  // Throttled update handler - batches updates every 50ms
+  const scheduleUpdate = useCallback((messageId: string, content: string) => {
+    pendingUpdatesRef.current.set(messageId, content);
 
-    ws.onopen = () => {
-      console.log("Connected to AI assistant");
-      setIsConnected(true);
-    };
+    if (updateTimerRef.current) {
+      return; // Already scheduled
+    }
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data);
+    updateTimerRef.current = setTimeout(() => {
+      flushPendingUpdates();
+      updateTimerRef.current = null;
+    }, 50);
+  }, [flushPendingUpdates]);
+
+  // Handle incoming WebSocket messages
+  useEffect(() => {
+    if (!lastMessage) return;
+
+    const data = JSON.parse(lastMessage.data);
 
       if (data.type === "init") {
         setMessages(data.messages);
@@ -89,19 +132,15 @@ export default function ChatPage() {
           setIsLoading(true);
         }
       } else if (data.type === "update") {
-        // Update streaming assistant message
-        setMessages((prev) => {
-          const updated = [...prev];
-          const index = updated.findIndex(m => m.id === data.messageId);
-          if (index !== -1) {
-            updated[index] = {
-              ...updated[index],
-              content: data.content
-            };
-          }
-          return updated;
-        });
+        // Use throttled update for streaming messages
+        scheduleUpdate(data.messageId, data.content);
       } else if (data.type === "complete") {
+        // Flush any pending updates before completing
+        if (updateTimerRef.current) {
+          clearTimeout(updateTimerRef.current);
+          updateTimerRef.current = null;
+        }
+        flushPendingUpdates();
         // Finalize assistant message
         setMessages((prev) => {
           const updated = [...prev];
@@ -304,49 +343,35 @@ export default function ChatPage() {
           return updated;
         });
       }
+  }, [lastMessage, scheduleUpdate, flushPendingUpdates]);
+
+  // Cleanup throttle timers on unmount
+  useEffect(() => {
+    return () => {
+      if (updateTimerRef.current) {
+        clearTimeout(updateTimerRef.current);
+      }
+      if (scrollTimerRef.current) {
+        clearTimeout(scrollTimerRef.current);
+      }
     };
+  }, []);
 
-    ws.onclose = () => {
-      console.log("Disconnected from AI assistant");
-      setIsConnected(false);
-      setIsLoading(false);
-    };
-
-    ws.onerror = (error) => {
-      console.error("WebSocket error:", error);
-      setIsConnected(false);
-      setIsLoading(false);
-    };
-
-    wsRef.current = ws;
-  };
-
-  const disconnect = () => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-      setIsConnected(false);
-      setIsLoading(false);
-    }
-  };
-
-  const sendMessage = (e: React.FormEvent) => {
+  const sendMessage = useCallback((e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!inputValue.trim() || !wsRef.current || !isConnected || isLoading) {
+    if (!inputValue.trim() || !isConnected || isLoading) {
       return;
     }
 
-    wsRef.current.send(
-      JSON.stringify({
-        type: "message",
-        content: inputValue,
-      })
-    );
+    sendJsonMessage({
+      type: "message",
+      content: inputValue,
+    });
 
     setInputValue("");
     setIsLoading(true);
-  };
+  }, [inputValue, isConnected, isLoading, sendJsonMessage]);
 
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString();
@@ -492,15 +517,13 @@ export default function ChatPage() {
     );
   };
 
-  const handleReset = () => {
-    if (!wsRef.current || !isConnected) return;
+  const handleReset = useCallback(() => {
+    if (!isConnected) return;
 
-    wsRef.current.send(
-      JSON.stringify({
-        type: "reset",
-      })
-    );
-  };
+    sendJsonMessage({
+      type: "reset",
+    });
+  }, [isConnected, sendJsonMessage]);
 
   const confirmReset = () => {
     handleReset();
