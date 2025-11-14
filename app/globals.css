@@ -222,6 +222,146 @@ body {
   }
 }
 
+/* Message Text */
+.message-text {
+  margin-bottom: 0.75rem;
+}
+
+/* Tool Use Cards */
+.tool-uses-container {
+  margin-top: 0.75rem;
+}
+
+.tool-use-card {
+  background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+  border-radius: 12px;
+  padding: 1rem;
+  margin-bottom: 0.75rem;
+  border: 2px solid #e0e7ff;
+  box-shadow: 0 2px 8px rgba(102, 126, 234, 0.1);
+  animation: toolSlideIn 0.3s ease-out;
+}
+
+@keyframes toolSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.tool-use-card.complete {
+  background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
+  border-color: #4caf50;
+}
+
+.tool-use-card.error {
+  background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%);
+  border-color: #f44336;
+}
+
+.tool-use-card.running {
+  background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
+  border-color: #ff9800;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
+.tool-use-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  font-weight: 600;
+  color: #333;
+}
+
+.tool-icon {
+  font-size: 1.25rem;
+}
+
+.tool-name {
+  flex: 1;
+  font-size: 0.95rem;
+}
+
+.tool-status {
+  font-size: 0.75rem;
+  padding: 0.25rem 0.75rem;
+  border-radius: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tool-status-running {
+  background: #ff9800;
+  color: white;
+}
+
+.tool-status-complete {
+  background: #4caf50;
+  color: white;
+}
+
+.tool-status-error {
+  background: #f44336;
+  color: white;
+}
+
+.tool-use-body {
+  background: rgba(255, 255, 255, 0.8);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.tool-calculation {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: #333;
+  font-family: 'Courier New', monospace;
+}
+
+.calc-operand {
+  color: #667eea;
+  font-size: 1.75rem;
+}
+
+.calc-operator {
+  color: #764ba2;
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+
+.calc-equals {
+  color: #999;
+  font-size: 1.5rem;
+}
+
+.calc-result {
+  color: #4caf50;
+  font-size: 2rem;
+  font-weight: 700;
+  padding: 0.25rem 0.75rem;
+  background: rgba(76, 175, 80, 0.1);
+  border-radius: 8px;
+}
+
 .loading-indicator {
   text-align: center;
   color: #999;

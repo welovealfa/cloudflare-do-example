@@ -8,6 +8,15 @@ interface Message {
   role: "user" | "assistant";
   content: string;
   timestamp: number;
+  toolUses?: ToolUse[];
+}
+
+interface ToolUse {
+  id: string;
+  name: string;
+  input: any;
+  result: any;
+  status: "running" | "complete" | "error";
 }
 
 export class ChatRoom implements DurableObject {
@@ -115,6 +124,17 @@ export class ChatRoom implements DurableObject {
     }
   }
 
+  // Simple calculator tool
+  calculate(operation: string, a: number, b: number): number {
+    switch (operation) {
+      case "add": return a + b;
+      case "subtract": return a - b;
+      case "multiply": return a * b;
+      case "divide": return b !== 0 ? a / b : NaN;
+      default: throw new Error(`Unknown operation: ${operation}`);
+    }
+  }
+
   async getAIResponse(messageId: string) {
     try {
       // Prepare conversation history for Claude
@@ -127,7 +147,34 @@ export class ChatRoom implements DurableObject {
           content: m.content
         }));
 
-      // Call Anthropic API with streaming
+      // Define tools for Claude
+      const tools = [
+        {
+          name: "calculator",
+          description: "A simple calculator that can perform basic arithmetic operations (add, subtract, multiply, divide). Use this when you need to perform exact calculations.",
+          input_schema: {
+            type: "object",
+            properties: {
+              operation: {
+                type: "string",
+                enum: ["add", "subtract", "multiply", "divide"],
+                description: "The mathematical operation to perform"
+              },
+              a: {
+                type: "number",
+                description: "The first number"
+              },
+              b: {
+                type: "number",
+                description: "The second number"
+              }
+            },
+            required: ["operation", "a", "b"]
+          }
+        }
+      ];
+
+      // Call Anthropic API with streaming and tools
       const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
@@ -139,7 +186,9 @@ export class ChatRoom implements DurableObject {
           model: "claude-sonnet-4-20250514",
           max_tokens: 4096,
           messages: conversationHistory,
-          stream: true
+          tools: tools,
+          stream: true,
+          system: "When using tools, always explain what you're doing before using the tool. For example, if using the calculator, say something like 'I'll calculate that for you' or 'Let me work that out' before using the calculator tool. After the tool completes, provide a natural language summary of the result."
         })
       });
 
@@ -157,6 +206,9 @@ export class ChatRoom implements DurableObject {
       const BROADCAST_INTERVAL = 3; // Broadcast every N chunks to reduce overhead
       let isFirstChunk = true;
       let buffer = ""; // Buffer for incomplete lines
+      let toolUse: any = null; // Track tool use blocks
+      let toolInput = ""; // Accumulate tool input JSON
+      let messageComplete = false; // Track if message is complete
 
       if (reader) {
         while (true) {
@@ -178,7 +230,12 @@ export class ChatRoom implements DurableObject {
               try {
                 const parsed = JSON.parse(data);
 
-                // Anthropic streaming format
+                // Log event types for debugging
+                if (parsed.type) {
+                  console.log("Event type:", parsed.type);
+                }
+
+                // Handle text content
                 if (parsed.type === "content_block_delta" && parsed.delta?.text) {
                   accumulatedContent += parsed.delta.text;
                   updateCounter++;
@@ -202,6 +259,102 @@ export class ChatRoom implements DurableObject {
                     }
                   }
                 }
+                // Handle tool use start
+                else if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
+                  toolUse = parsed.content_block;
+                  toolInput = "";
+
+                  // Create a tool use entry with running status
+                  const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                  if (messageIndex !== -1) {
+                    if (!this.messages[messageIndex].toolUses) {
+                      this.messages[messageIndex].toolUses = [];
+                    }
+                    this.messages[messageIndex].toolUses!.push({
+                      id: toolUse.id,
+                      name: toolUse.name,
+                      input: null,
+                      result: null,
+                      status: "running"
+                    });
+
+                    // Broadcast tool use started
+                    this.broadcast(JSON.stringify({
+                      type: "tool_use",
+                      messageId: messageId,
+                      toolUse: {
+                        id: toolUse.id,
+                        name: toolUse.name,
+                        status: "running"
+                      }
+                    }));
+                  }
+                }
+                // Handle tool input accumulation
+                else if (parsed.type === "content_block_delta" && parsed.delta?.type === "input_json_delta") {
+                  toolInput += parsed.delta.partial_json;
+                }
+                // Handle tool use end - execute the tool
+                else if (parsed.type === "content_block_stop" && toolUse) {
+                  try {
+                    const input = JSON.parse(toolInput);
+                    const result = this.calculate(input.operation, input.a, input.b);
+
+                    // Update tool use with result
+                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                    if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
+                      const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
+                      if (toolUseIndex !== -1) {
+                        this.messages[messageIndex].toolUses![toolUseIndex].input = input;
+                        this.messages[messageIndex].toolUses![toolUseIndex].result = result;
+                        this.messages[messageIndex].toolUses![toolUseIndex].status = "complete";
+
+                        // Broadcast tool use completed
+                        this.broadcast(JSON.stringify({
+                          type: "tool_use",
+                          messageId: messageId,
+                          toolUse: {
+                            id: toolUse.id,
+                            name: toolUse.name,
+                            input: input,
+                            result: result,
+                            status: "complete"
+                          }
+                        }));
+                      }
+                    }
+
+                    toolUse = null;
+                    toolInput = "";
+                  } catch (e) {
+                    console.error("Tool execution error:", e);
+
+                    // Update tool use with error
+                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                    if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
+                      const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
+                      if (toolUseIndex !== -1) {
+                        this.messages[messageIndex].toolUses![toolUseIndex].status = "error";
+                        this.broadcast(JSON.stringify({
+                          type: "tool_use",
+                          messageId: messageId,
+                          toolUse: {
+                            id: toolUse.id,
+                            name: toolUse.name,
+                            status: "error"
+                          }
+                        }));
+                      }
+                    }
+                    toolUse = null;
+                    toolInput = "";
+                  }
+                }
+                // Handle message stop event
+                else if (parsed.type === "message_stop" || parsed.type === "message_delta" && parsed.delta?.stop_reason) {
+                  messageComplete = true;
+                  console.log("Message complete detected");
+                }
               } catch (e) {
                 // Only log if it's not an empty line
                 if (data.length > 0) {
@@ -213,17 +366,19 @@ export class ChatRoom implements DurableObject {
         }
       }
 
-      // Final update
+      // Final update - only send complete if we got the message_stop event
       const messageIndex = this.messages.findIndex(m => m.id === messageId);
       if (messageIndex !== -1) {
         this.messages[messageIndex].content = accumulatedContent;
         await this.state.storage.put("messages", this.messages);
 
-        this.broadcast(JSON.stringify({
-          type: "complete",
-          messageId: messageId,
-          content: accumulatedContent
-        }));
+        if (messageComplete) {
+          this.broadcast(JSON.stringify({
+            type: "complete",
+            messageId: messageId,
+            content: accumulatedContent
+          }));
+        }
       }
 
     } catch (error) {

@@ -1,6 +1,7 @@
 name = "chat-worker"
 main = "worker/src/index.ts"
 compatibility_date = "2024-11-13"
+compatibility_flags = ["nodejs_compat"]
 
 [vars]
 # Environment variables (use wrangler secret put for sensitive values in production)
@@ -11,4 +12,4 @@ class_name = "ChatRoom"
 
 [[migrations]]
 tag = "v1"
-new_classes = ["ChatRoom"]
+new_sqlite_classes = ["ChatRoom"]
