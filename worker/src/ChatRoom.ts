@@ -5,10 +5,18 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
 }
 
+// Sub-task structure for tools that support progressive updates
+export interface SubTask {
+  id: string;
+  name: string;
+  status: "pending" | "running" | "complete" | "error";
+  result?: string;
+}
+
 // Content blocks match Claude API structure
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: unknown; status?: "running" | "complete" | "error"; result?: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown; status?: "running" | "complete" | "error"; result?: string; subTasks?: SubTask[] }
   | { type: "tool_result"; tool_use_id: string; content: string };
 
 interface Message {
@@ -323,7 +331,30 @@ export class ChatRoom {
       });
 
       try {
-        const result = await executeTool(this.tools, toolUse.name, toolUse.input);
+        // Create progress callback for sub-task updates
+        const onProgress = (subTasks: SubTask[]) => {
+          console.log(`[ChatRoom] Progress callback called with ${subTasks.length} sub-tasks:`, JSON.stringify(subTasks));
+          const toolBlockIndex = this.messages[messageIndex].content.findIndex(
+            b => b.type === "tool_use" && b.id === toolUse.id
+          );
+          if (toolBlockIndex !== -1) {
+            (this.messages[messageIndex].content[toolBlockIndex] as Extract<ContentBlock, { type: "tool_use" }>).subTasks = subTasks;
+            console.log(`[ChatRoom] Updated tool block at index ${toolBlockIndex} with subTasks`);
+          }
+
+          // Broadcast sub-task progress
+          this.broadcastUpdate({
+            type: "update",
+            messageId,
+            content: this.messages[messageIndex].content,
+            iteration
+          });
+          console.log(`[ChatRoom] Broadcasted sub-task update`);
+        };
+
+        console.log(`[ChatRoom] About to execute tool: ${toolUse.name}`);
+        const result = await executeTool(this.tools, toolUse.name, toolUse.input, onProgress);
+        console.log(`[ChatRoom] Tool execution completed with result:`, result);
 
         // Update tool block with result
         const toolBlockIndex = this.messages[messageIndex].content.findIndex(

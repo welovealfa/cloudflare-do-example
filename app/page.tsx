@@ -4,10 +4,18 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import useWebSocket, { ReadyState } from "react-use-websocket";
 import { Streamdown } from "streamdown";
 
+// Sub-task structure for tools that support progressive updates
+interface SubTask {
+  id: string;
+  name: string;
+  status: "pending" | "running" | "complete" | "error";
+  result?: string;
+}
+
 // Content blocks match backend structure
 type ContentBlock =
   | { type: "text"; text: string }
-  | { type: "tool_use"; id: string; name: string; input: unknown; status?: "running" | "complete" | "error"; result?: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown; status?: "running" | "complete" | "error"; result?: string; subTasks?: SubTask[] }
   | { type: "tool_result"; tool_use_id: string; content: string };
 
 interface ToolUse {
@@ -16,6 +24,7 @@ interface ToolUse {
   input: any;
   result: any;
   status: "running" | "complete" | "error";
+  subTasks?: SubTask[];
 }
 
 interface Message {
@@ -60,7 +69,8 @@ function getToolUses(content: ContentBlock[]): ToolUse[] {
       name: block.name,
       input: block.input,
       result: block.result,
-      status: block.status || "running"
+      status: block.status || "running",
+      subTasks: block.subTasks
     }));
 }
 
@@ -492,7 +502,46 @@ export default function ChatPage() {
     // Validation card
     if (toolUse.name === "validate_sum") {
       const isValid = toolUse.result?.includes("✓") || toolUse.result?.includes("passed");
+      const hasSubTasks = toolUse.subTasks && toolUse.subTasks.length > 0;
 
+      console.log(`[ToolUseCard] Rendering validation card. isLoading: ${isLoading}, hasSubTasks: ${hasSubTasks}, subTasks:`, toolUse.subTasks);
+
+      // Show sub-tasks if they exist (during loading or when complete)
+      if (hasSubTasks) {
+        console.log(`[ToolUseCard] Rendering sub-tasks view with ${toolUse.subTasks!.length} tasks`);
+        const allComplete = toolUse.subTasks!.every(task => task.status === "complete");
+        const cardClass = allComplete && !isLoading
+          ? `tool-use-card validation-card ${isValid ? 'success' : 'error'}`
+          : 'tool-use-card validation-card loading';
+
+        return (
+          <div className={cardClass}>
+            <div className="tool-use-header">
+              <span className="tool-name">Validation</span>
+            </div>
+            <div className="sub-tasks-container">
+              {toolUse.subTasks!.map((subTask) => (
+                <div key={subTask.id} className={`sub-task ${subTask.status}`}>
+                  <div className="sub-task-icon">
+                    {subTask.status === "pending" && <span className="status-pending">○</span>}
+                    {subTask.status === "running" && <div className="spinner sub-task-spinner"></div>}
+                    {subTask.status === "complete" && <span className="status-complete">✓</span>}
+                    {subTask.status === "error" && <span className="status-error">✗</span>}
+                  </div>
+                  <span className="sub-task-name">{subTask.name}</span>
+                </div>
+              ))}
+            </div>
+            {toolUse.result && allComplete && (
+              <div className="tool-use-body">
+                {toolUse.result}
+              </div>
+            )}
+          </div>
+        );
+      }
+
+      // Fallback for validation without sub-tasks
       if (isLoading) {
         return (
           <div className="tool-use-card validation-card loading">
@@ -510,7 +559,6 @@ export default function ChatPage() {
         <div className={`tool-use-card validation-card ${isValid ? 'success' : 'error'}`}>
           <div className="tool-use-header">
             <span className="tool-name">Validation</span>
-            <span className="tool-badge">{isValid ? "COMPLETE" : "FAILED"}</span>
           </div>
           {toolUse.result && (
             <div className="tool-use-body">
@@ -539,7 +587,6 @@ export default function ChatPage() {
       <div className="tool-use-card complete">
         <div className="tool-use-header">
           <span className="tool-name">Calculator</span>
-          <span className="tool-badge">COMPLETE</span>
         </div>
         {toolUse.input && toolUse.result && (
           <div className="tool-use-body">
@@ -651,7 +698,8 @@ export default function ChatPage() {
                                 name: block.name,
                                 input: block.input,
                                 result: block.result,
-                                status: block.status || "running"
+                                status: block.status || "running",
+                                subTasks: block.subTasks
                               }}
                             />
                           );
