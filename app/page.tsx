@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { Streamdown } from "streamdown";
 
 interface ToolUse {
   id: string;
@@ -16,6 +17,17 @@ interface Message {
   content: string;
   timestamp: number;
   toolUses?: ToolUse[];
+  agentLoopState?: {
+    currentIteration: number;
+    phase: "observe" | "think" | "act" | "validate" | "complete";
+    totalIterations?: number;
+    validationResults?: Array<{
+      iteration: number;
+      isValid: boolean;
+      reasoning: string;
+    }>;
+    retryCount?: number;
+  };
 }
 
 export default function ChatPage() {
@@ -24,6 +36,11 @@ export default function ChatPage() {
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showResetConfirm, setShowResetConfirm] = useState(false);
+  const [currentAgentState, setCurrentAgentState] = useState<{
+    messageId: string;
+    iteration: number;
+    phase: string;
+  } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -92,12 +109,159 @@ export default function ChatPage() {
           if (index !== -1) {
             updated[index] = {
               ...updated[index],
-              content: data.content
+              content: data.content,
+              agentLoopState: {
+                currentIteration: updated[index].agentLoopState?.currentIteration || data.totalIterations,
+                phase: "complete",
+                totalIterations: data.totalIterations,
+                // Preserve validation results if they exist
+                validationResults: updated[index].agentLoopState?.validationResults,
+                retryCount: updated[index].agentLoopState?.retryCount
+              }
             };
           }
           return updated;
         });
         setIsLoading(false);
+        setCurrentAgentState(null);
+      } else if (data.type === "agent_iteration") {
+        // Agent starting a new iteration
+        setCurrentAgentState({
+          messageId: data.messageId,
+          iteration: data.iteration,
+          phase: data.phase
+        });
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1) {
+            updated[index] = {
+              ...updated[index],
+              agentLoopState: {
+                // Preserve existing validation results and retry count
+                ...updated[index].agentLoopState,
+                currentIteration: data.iteration,
+                phase: data.phase
+              }
+            };
+          }
+          return updated;
+        });
+      } else if (data.type === "agent_observation") {
+        // Agent observing (already preserves all state via spread)
+        setCurrentAgentState((prev) => prev ? { ...prev, phase: "observe" } : null);
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1 && updated[index].agentLoopState) {
+            updated[index] = {
+              ...updated[index],
+              agentLoopState: {
+                ...updated[index].agentLoopState!,
+                phase: "observe"
+              }
+            };
+          }
+          return updated;
+        });
+      } else if (data.type === "agent_thinking") {
+        // Agent thinking (already preserves all state via spread)
+        setCurrentAgentState((prev) => prev ? { ...prev, phase: "think" } : null);
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1 && updated[index].agentLoopState) {
+            updated[index] = {
+              ...updated[index],
+              agentLoopState: {
+                ...updated[index].agentLoopState!,
+                phase: "think"
+              }
+            };
+          }
+          return updated;
+        });
+      } else if (data.type === "agent_action") {
+        // Agent acting (already preserves all state via spread)
+        setCurrentAgentState((prev) => prev ? { ...prev, phase: "act" } : null);
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1 && updated[index].agentLoopState) {
+            updated[index] = {
+              ...updated[index],
+              agentLoopState: {
+                ...updated[index].agentLoopState!,
+                phase: "act"
+              }
+            };
+          }
+          return updated;
+        });
+      } else if (data.type === "agent_validating") {
+        // Agent validating (already preserves all state via spread)
+        setCurrentAgentState((prev) => prev ? { ...prev, phase: "validate" } : null);
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1 && updated[index].agentLoopState) {
+            updated[index] = {
+              ...updated[index],
+              agentLoopState: {
+                ...updated[index].agentLoopState!,
+                phase: "validate"
+              }
+            };
+          }
+          return updated;
+        });
+      } else if (data.type === "agent_validation_result") {
+        // Validation result received
+        console.log("📊 Validation result received:", {
+          iteration: data.iteration,
+          isValid: data.isValid,
+          reasoning: data.reasoning
+        });
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1 && updated[index].agentLoopState) {
+            const existingResults = updated[index].agentLoopState!.validationResults || [];
+            const newResults = [
+              ...existingResults,
+              {
+                iteration: data.iteration,
+                isValid: data.isValid,
+                reasoning: data.reasoning
+              }
+            ];
+            console.log("📊 Updated validation results:", newResults);
+            updated[index] = {
+              ...updated[index],
+              agentLoopState: {
+                ...updated[index].agentLoopState!,
+                validationResults: newResults
+              }
+            };
+          }
+          return updated;
+        });
+      } else if (data.type === "agent_retry") {
+        // Agent retrying after validation failure
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1 && updated[index].agentLoopState) {
+            updated[index] = {
+              ...updated[index],
+              agentLoopState: {
+                ...updated[index].agentLoopState!,
+                retryCount: data.retryCount
+              }
+            };
+          }
+          return updated;
+        });
       } else if (data.type === "error") {
         setMessages((prev) => {
           const updated = [...prev];
@@ -186,6 +350,109 @@ export default function ChatPage() {
 
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString();
+  };
+
+  const AgentLoopIndicator = ({ loopState }: { loopState: Message["agentLoopState"] }) => {
+    if (!loopState) return null;
+
+    const getPhaseLabel = (phase: string) => {
+      switch (phase) {
+        case "observe": return "🔍 Observing";
+        case "think": return "🤔 Thinking";
+        case "act": return "⚡ Acting";
+        case "validate": return "✓ Validating";
+        case "complete": return "✅ Complete";
+        default: return phase;
+      }
+    };
+
+    const getPhaseColor = (phase: string) => {
+      switch (phase) {
+        case "observe": return "#3b82f6";
+        case "think": return "#8b5cf6";
+        case "act": return "#10b981";
+        case "validate": return "#f59e0b";
+        case "complete": return "#6b7280";
+        default: return "#6b7280";
+      }
+    };
+
+    return (
+      <div className="agent-loop-indicator" style={{
+        background: `${getPhaseColor(loopState.phase)}15`,
+        borderLeft: `3px solid ${getPhaseColor(loopState.phase)}`,
+        padding: "8px 12px",
+        marginBottom: "8px",
+        borderRadius: "4px",
+        fontSize: "13px",
+        color: getPhaseColor(loopState.phase)
+      }}>
+        <span style={{ fontWeight: 600 }}>
+          Iteration {loopState.currentIteration}
+          {loopState.totalIterations && ` of ${loopState.totalIterations}`}
+          {loopState.retryCount && loopState.retryCount > 0 && (
+            <span style={{ marginLeft: "8px", fontSize: "12px", opacity: 0.8 }}>
+              (Retry {loopState.retryCount})
+            </span>
+          )}
+        </span>
+        {" • "}
+        <span>{getPhaseLabel(loopState.phase)}</span>
+      </div>
+    );
+  };
+
+  const ValidationResults = ({ validationResults }: {
+    validationResults?: Array<{
+      iteration: number;
+      isValid: boolean;
+      reasoning: string;
+    }>;
+  }) => {
+    if (!validationResults || validationResults.length === 0) return null;
+
+    return (
+      <div style={{ marginTop: "12px" }}>
+        <div style={{ fontSize: "13px", fontWeight: 600, marginBottom: "8px", color: "#6b7280" }}>
+          Validation Results:
+        </div>
+        {validationResults.map((result, idx) => (
+          <div
+            key={idx}
+            style={{
+              background: result.isValid ? "#10b98115" : "#ef444415",
+              border: `2px solid ${result.isValid ? "#10b981" : "#ef4444"}`,
+              padding: "12px",
+              borderRadius: "8px",
+              fontSize: "13px",
+              marginTop: idx > 0 ? "8px" : "0"
+            }}
+          >
+            <div style={{
+              display: "flex",
+              alignItems: "center",
+              marginBottom: "6px",
+              color: result.isValid ? "#10b981" : "#ef4444"
+            }}>
+              <span style={{ fontSize: "18px", marginRight: "8px" }}>
+                {result.isValid ? "✓" : "✗"}
+              </span>
+              <span style={{ fontWeight: 600 }}>
+                {result.isValid ? "Validation Passed" : "Validation Failed"}
+              </span>
+              {validationResults.length > 1 && (
+                <span style={{ marginLeft: "8px", opacity: 0.7, fontSize: "12px" }}>
+                  (Iteration {result.iteration})
+                </span>
+              )}
+            </div>
+            <div style={{ color: "#374151", fontSize: "13px" }}>
+              {result.reasoning}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
   };
 
   const ToolUseCard = ({ toolUse }: { toolUse: ToolUse }) => {
@@ -301,8 +568,13 @@ export default function ChatPage() {
                 <span className="message-time">{formatTime(msg.timestamp)}</span>
               </div>
               <div className="message-content">
+                {msg.role === "assistant" && msg.agentLoopState && (
+                  <AgentLoopIndicator loopState={msg.agentLoopState} />
+                )}
                 {msg.content && msg.content.trim() && (
-                  <div className="message-text">{msg.content}</div>
+                  <div className="message-text">
+                    <Streamdown>{msg.content}</Streamdown>
+                  </div>
                 )}
                 {msg.toolUses && msg.toolUses.length > 0 && (
                   <div className="tool-uses-container">
@@ -310,6 +582,9 @@ export default function ChatPage() {
                       <ToolUseCard key={toolUse.id} toolUse={toolUse} />
                     ))}
                   </div>
+                )}
+                {msg.role === "assistant" && msg.agentLoopState?.validationResults && (
+                  <ValidationResults validationResults={msg.agentLoopState.validationResults} />
                 )}
                 {!msg.content && (!msg.toolUses || msg.toolUses.length === 0) && (
                   <span className="typing-indicator">

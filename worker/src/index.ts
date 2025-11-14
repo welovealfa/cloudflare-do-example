@@ -25,6 +25,20 @@ interface ToolUse {
   status: "running" | "complete" | "error";
 }
 
+interface AgentLoopState {
+  iteration: number;
+  phase: "observe" | "think" | "act" | "complete";
+  observations: any[];
+  toolResults: ToolResult[];
+  conversationHistory: any[];
+}
+
+interface ToolResult {
+  tool_use_id: string;
+  type: "tool_result";
+  content: string;
+}
+
 export class ChatRoom {
   private sessions: Set<CloudflareWebSocket>;
   private messages: Message[];
@@ -130,6 +144,35 @@ export class ChatRoom {
     }
   }
 
+  // Get tool definitions for Claude
+  private getToolDefinitions() {
+    return [
+      {
+        name: "calculator",
+        description: "A simple calculator that can perform basic arithmetic operations (add, subtract, multiply, divide). Use this when you need to perform exact calculations.",
+        input_schema: {
+          type: "object",
+          properties: {
+            operation: {
+              type: "string",
+              enum: ["add", "subtract", "multiply", "divide"],
+              description: "The mathematical operation to perform"
+            },
+            a: {
+              type: "number",
+              description: "The first number"
+            },
+            b: {
+              type: "number",
+              description: "The second number"
+            }
+          },
+          required: ["operation", "a", "b"]
+        }
+      }
+    ];
+  }
+
   // Simple calculator tool
   calculate(operation: string, a: number, b: number): number {
     switch (operation) {
@@ -141,10 +184,36 @@ export class ChatRoom {
     }
   }
 
-  async getAIResponse(messageId: string) {
+  // Execute a single tool
+  private async executeTool(toolName: string, toolInput: any): Promise<string> {
     try {
-      // Prepare conversation history for Claude
-      const conversationHistory = this.messages
+      switch (toolName) {
+        case "calculator":
+          const result = this.calculate(toolInput.operation, toolInput.a, toolInput.b);
+          return `The result of ${toolInput.a} ${toolInput.operation} ${toolInput.b} is ${result}`;
+        default:
+          throw new Error(`Unknown tool: ${toolName}`);
+      }
+    } catch (error) {
+      return `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  async getAIResponse(messageId: string) {
+    const MAX_ITERATIONS = 10;
+
+    try {
+      // Initialize agent loop state
+      const agentState: AgentLoopState = {
+        iteration: 0,
+        phase: "observe",
+        observations: [],
+        toolResults: [],
+        conversationHistory: []
+      };
+
+      // Prepare initial conversation history
+      agentState.conversationHistory = this.messages
         .filter(m => m.role === "user" || m.role === "assistant")
         .filter(m => m.id !== messageId) // Exclude the placeholder message
         .filter(m => m.content && m.content.trim().length > 0) // Exclude empty messages
@@ -153,227 +222,334 @@ export class ChatRoom {
           content: m.content
         }));
 
-      // Define tools for Claude
-      const tools = [
-        {
-          name: "calculator",
-          description: "A simple calculator that can perform basic arithmetic operations (add, subtract, multiply, divide). Use this when you need to perform exact calculations.",
-          input_schema: {
-            type: "object",
-            properties: {
-              operation: {
-                type: "string",
-                enum: ["add", "subtract", "multiply", "divide"],
-                description: "The mathematical operation to perform"
-              },
-              a: {
-                type: "number",
-                description: "The first number"
-              },
-              b: {
-                type: "number",
-                description: "The second number"
-              }
-            },
-            required: ["operation", "a", "b"]
-          }
-        }
-      ];
+      // Get tool definitions
+      const tools = this.getToolDefinitions();
 
-      // Call Anthropic API with streaming and tools
-      const response = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": this.env.ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01"
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 4096,
-          messages: conversationHistory,
-          tools: tools,
-          stream: true,
-          system: "When using tools, always explain what you're doing before using the tool. For example, if using the calculator, say something like 'I'll calculate that for you' or 'Let me work that out' before using the calculator tool. After the tool completes, provide a natural language summary of the result."
-        })
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        console.error("Anthropic API error response:", errorText);
-        throw new Error(`Anthropic API error: ${response.status}`);
-      }
-
-      // Process streaming response
-      const reader = response.body?.getReader();
-      const decoder = new TextDecoder();
       let accumulatedContent = "";
-      let buffer = ""; // Buffer for incomplete lines
-      let toolUse: any = null; // Track tool use blocks
-      let toolInput = ""; // Accumulate tool input JSON
-      let messageComplete = false; // Track if message is complete
+      let shouldContinue = true;
 
-      if (reader) {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
+      // **AGENT LOOP: Observe → Think → Act → Repeat**
+      while (shouldContinue && agentState.iteration < MAX_ITERATIONS) {
+        agentState.iteration++;
 
-          // Append new chunk to buffer
-          buffer += decoder.decode(value, { stream: true });
+        // Broadcast iteration start
+        this.broadcast(JSON.stringify({
+          type: "agent_iteration",
+          messageId: messageId,
+          iteration: agentState.iteration,
+          phase: "observe"
+        }));
 
-          // Split by newlines but keep the last incomplete line in buffer
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || ""; // Keep the last incomplete line
+        // **PHASE 1: OBSERVE** - Prepare messages for this iteration
+        agentState.phase = "observe";
+        const messagesToSend: any[] = [...agentState.conversationHistory];
 
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6).trim();
-              if (data === "[DONE]" || data === "") continue;
+        // Add tool results from previous iteration if any
+        if (agentState.toolResults.length > 0) {
+          messagesToSend.push({
+            role: "user",
+            content: agentState.toolResults
+          });
 
-              try {
-                const parsed = JSON.parse(data);
+          // Clear tool results for next iteration
+          agentState.toolResults = [];
+        }
 
-                // Log event types for debugging
-                if (parsed.type) {
-                  console.log("Event type:", parsed.type);
-                }
+        // Broadcast observation
+        this.broadcast(JSON.stringify({
+          type: "agent_observation",
+          messageId: messageId,
+          iteration: agentState.iteration,
+          observations: messagesToSend.length
+        }));
 
-                // Handle text content
-                if (parsed.type === "content_block_delta" && parsed.delta?.text) {
-                  accumulatedContent += parsed.delta.text;
+        // **PHASE 2: THINK** - Call Claude API
+        agentState.phase = "think";
 
-                  const messageIndex = this.messages.findIndex(m => m.id === messageId);
-                  if (messageIndex !== -1) {
-                    this.messages[messageIndex].content = accumulatedContent;
+        this.broadcast(JSON.stringify({
+          type: "agent_thinking",
+          messageId: messageId,
+          iteration: agentState.iteration
+        }));
 
-                    // Broadcast update (don't wait for storage on every update)
-                    this.broadcast(JSON.stringify({
-                      type: "update",
-                      messageId: messageId,
-                      content: accumulatedContent
-                    }));
-                  }
-                }
-                // Handle tool use start
-                else if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
-                  toolUse = parsed.content_block;
-                  toolInput = "";
+        const response = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": this.env.ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01"
+          },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 4096,
+            messages: messagesToSend,
+            tools: tools,
+            stream: true,
+            system: "You are a helpful assistant with access to tools. Use tools when needed to provide accurate responses. When using tools, explain your reasoning."
+          })
+        });
 
-                  // Create a tool use entry with running status
-                  const messageIndex = this.messages.findIndex(m => m.id === messageId);
-                  if (messageIndex !== -1) {
-                    if (!this.messages[messageIndex].toolUses) {
-                      this.messages[messageIndex].toolUses = [];
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error("Anthropic API error response:", errorText);
+          throw new Error(`Anthropic API error: ${response.status}`);
+        }
+
+        // **PHASE 3: ACT** - Process streaming response and execute tools
+        agentState.phase = "act";
+
+        const reader = response.body?.getReader();
+        const decoder = new TextDecoder();
+        let buffer = ""; // Buffer for incomplete lines
+        let currentToolUse: any = null; // Track current tool use block
+        let toolInput = ""; // Accumulate tool input JSON
+        const toolUsesInThisIteration: Array<{ id: string; name: string; input: any }> = [];
+        let stopReason: string | null = null;
+        let iterationContent = ""; // Content for just this iteration (for conversation history)
+
+        if (reader) {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            // Append new chunk to buffer
+            buffer += decoder.decode(value, { stream: true });
+
+            // Split by newlines but keep the last incomplete line in buffer
+            const lines = buffer.split("\n");
+            buffer = lines.pop() || ""; // Keep the last incomplete line
+
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                const data = line.slice(6).trim();
+                if (data === "[DONE]" || data === "") continue;
+
+                try {
+                  const parsed = JSON.parse(data);
+
+                  // Handle text content
+                  if (parsed.type === "content_block_delta" && parsed.delta?.text) {
+                    const textDelta = parsed.delta.text;
+                    accumulatedContent += textDelta;
+                    iterationContent += textDelta; // Track content for this iteration only
+
+                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                    if (messageIndex !== -1) {
+                      this.messages[messageIndex].content = accumulatedContent;
+
+                      // Broadcast update (don't wait for storage on every update)
+                      this.broadcast(JSON.stringify({
+                        type: "update",
+                        messageId: messageId,
+                        content: accumulatedContent,
+                        iteration: agentState.iteration
+                      }));
                     }
-                    this.messages[messageIndex].toolUses!.push({
-                      id: toolUse.id,
-                      name: toolUse.name,
-                      input: null,
-                      result: null,
-                      status: "running"
-                    });
+                  }
+                  // Handle tool use start
+                  else if (parsed.type === "content_block_start" && parsed.content_block?.type === "tool_use") {
+                    currentToolUse = parsed.content_block;
+                    toolInput = "";
 
-                    // Broadcast tool use started
-                    this.broadcast(JSON.stringify({
-                      type: "tool_use",
-                      messageId: messageId,
-                      toolUse: {
-                        id: toolUse.id,
-                        name: toolUse.name,
+                    // Create a tool use entry with running status
+                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                    if (messageIndex !== -1) {
+                      if (!this.messages[messageIndex].toolUses) {
+                        this.messages[messageIndex].toolUses = [];
+                      }
+                      this.messages[messageIndex].toolUses!.push({
+                        id: currentToolUse.id,
+                        name: currentToolUse.name,
+                        input: null,
+                        result: null,
                         status: "running"
-                      }
-                    }));
-                  }
-                }
-                // Handle tool input accumulation
-                else if (parsed.type === "content_block_delta" && parsed.delta?.type === "input_json_delta") {
-                  toolInput += parsed.delta.partial_json;
-                }
-                // Handle tool use end - execute the tool
-                else if (parsed.type === "content_block_stop" && toolUse) {
-                  try {
-                    const input = JSON.parse(toolInput);
-                    const result = this.calculate(input.operation, input.a, input.b);
+                      });
 
-                    // Update tool use with result
-                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
-                    if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
-                      const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
-                      if (toolUseIndex !== -1) {
-                        this.messages[messageIndex].toolUses![toolUseIndex].input = input;
-                        this.messages[messageIndex].toolUses![toolUseIndex].result = result;
-                        this.messages[messageIndex].toolUses![toolUseIndex].status = "complete";
-
-                        // Broadcast tool use completed
-                        this.broadcast(JSON.stringify({
-                          type: "tool_use",
-                          messageId: messageId,
-                          toolUse: {
-                            id: toolUse.id,
-                            name: toolUse.name,
-                            input: input,
-                            result: result,
-                            status: "complete"
-                          }
-                        }));
-                      }
+                      // Broadcast tool use started
+                      this.broadcast(JSON.stringify({
+                        type: "tool_use",
+                        messageId: messageId,
+                        iteration: agentState.iteration,
+                        toolUse: {
+                          id: currentToolUse.id,
+                          name: currentToolUse.name,
+                          status: "running"
+                        }
+                      }));
                     }
-
-                    toolUse = null;
-                    toolInput = "";
-                  } catch (e) {
-                    console.error("Tool execution error:", e);
-
-                    // Update tool use with error
-                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
-                    if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
-                      const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
-                      if (toolUseIndex !== -1) {
-                        this.messages[messageIndex].toolUses![toolUseIndex].status = "error";
-                        this.broadcast(JSON.stringify({
-                          type: "tool_use",
-                          messageId: messageId,
-                          toolUse: {
-                            id: toolUse.id,
-                            name: toolUse.name,
-                            status: "error"
-                          }
-                        }));
-                      }
-                    }
-                    toolUse = null;
-                    toolInput = "";
                   }
-                }
-                // Handle message stop event
-                else if (parsed.type === "message_stop" || parsed.type === "message_delta" && parsed.delta?.stop_reason) {
-                  messageComplete = true;
-                  console.log("Message complete detected");
-                }
-              } catch (e) {
-                // Only log if it's not an empty line
-                if (data.length > 0) {
-                  console.error("Failed to parse SSE data:", data, e);
+                  // Handle tool input accumulation
+                  else if (parsed.type === "content_block_delta" && parsed.delta?.type === "input_json_delta") {
+                    toolInput += parsed.delta.partial_json;
+                  }
+                  // Handle tool use end - collect for batch execution
+                  else if (parsed.type === "content_block_stop" && currentToolUse) {
+                    try {
+                      const input = JSON.parse(toolInput);
+                      toolUsesInThisIteration.push({
+                        id: currentToolUse.id,
+                        name: currentToolUse.name,
+                        input: input
+                      });
+                      currentToolUse = null;
+                      toolInput = "";
+                    } catch (e) {
+                      console.error("Tool input parsing error:", e);
+                      currentToolUse = null;
+                      toolInput = "";
+                    }
+                  }
+                  // Handle message stop/delta event
+                  else if (parsed.type === "message_stop" || (parsed.type === "message_delta" && parsed.delta?.stop_reason)) {
+                    stopReason = parsed.type === "message_stop" ? "end_turn" : parsed.delta?.stop_reason;
+                    console.log("Message complete, stop reason:", stopReason);
+                  }
+                } catch (e) {
+                  if (data.length > 0) {
+                    console.error("Failed to parse SSE data:", data, e);
+                  }
                 }
               }
             }
           }
         }
+
+        // Add the assistant's response to conversation history
+        // This is required by Anthropic API before we can send tool_results
+        if (toolUsesInThisIteration.length > 0 || iterationContent) {
+          const assistantContent: any[] = [];
+
+          // Add text content if present (only from this iteration)
+          if (iterationContent) {
+            assistantContent.push({
+              type: "text",
+              text: iterationContent
+            });
+          }
+
+          // Add tool_use blocks
+          for (const toolUse of toolUsesInThisIteration) {
+            assistantContent.push({
+              type: "tool_use",
+              id: toolUse.id,
+              name: toolUse.name,
+              input: toolUse.input
+            });
+          }
+
+          // Add assistant message to conversation history
+          agentState.conversationHistory.push({
+            role: "assistant",
+            content: assistantContent
+          });
+        }
+
+        // Broadcast action phase with tool executions
+        console.log(`[Iteration ${agentState.iteration}] toolUsesInThisIteration:`, toolUsesInThisIteration);
+
+        if (toolUsesInThisIteration.length > 0) {
+          this.broadcast(JSON.stringify({
+            type: "agent_action",
+            messageId: messageId,
+            iteration: agentState.iteration,
+            toolCount: toolUsesInThisIteration.length
+          }));
+
+          console.log(`[Iteration ${agentState.iteration}] Executing ${toolUsesInThisIteration.length} tools...`);
+
+          // Execute all tools in this iteration
+          for (const toolUse of toolUsesInThisIteration) {
+            try {
+              const result = await this.executeTool(toolUse.name, toolUse.input);
+
+              // Update tool use with result
+              const messageIndex = this.messages.findIndex(m => m.id === messageId);
+              if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
+                const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
+                if (toolUseIndex !== -1) {
+                  this.messages[messageIndex].toolUses![toolUseIndex].input = toolUse.input;
+                  this.messages[messageIndex].toolUses![toolUseIndex].result = result;
+                  this.messages[messageIndex].toolUses![toolUseIndex].status = "complete";
+
+                  // Broadcast tool use completed
+                  this.broadcast(JSON.stringify({
+                    type: "tool_use",
+                    messageId: messageId,
+                    iteration: agentState.iteration,
+                    toolUse: {
+                      id: toolUse.id,
+                      name: toolUse.name,
+                      input: toolUse.input,
+                      result: result,
+                      status: "complete"
+                    }
+                  }));
+                }
+              }
+
+              // Add tool result for next iteration
+              agentState.toolResults.push({
+                tool_use_id: toolUse.id,
+                type: "tool_result",
+                content: result
+              });
+            } catch (error) {
+              console.error("Tool execution error:", error);
+
+              // Update tool use with error
+              const messageIndex = this.messages.findIndex(m => m.id === messageId);
+              if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
+                const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
+                if (toolUseIndex !== -1) {
+                  this.messages[messageIndex].toolUses![toolUseIndex].status = "error";
+                  this.broadcast(JSON.stringify({
+                    type: "tool_use",
+                    messageId: messageId,
+                    iteration: agentState.iteration,
+                    toolUse: {
+                      id: toolUse.id,
+                      name: toolUse.name,
+                      status: "error"
+                    }
+                  }));
+                }
+              }
+
+              // Add error result for next iteration
+              agentState.toolResults.push({
+                tool_use_id: toolUse.id,
+                type: "tool_result",
+                content: `Error: ${error instanceof Error ? error.message : String(error)}`
+              });
+            }
+          }
+
+          // Continue to next iteration with tool results
+          shouldContinue = true;
+        } else {
+          // No tools were used, this is the final response
+          shouldContinue = false;
+        }
+
+        // **DECISION: Should we continue the loop?**
+        // Stop if no tools were used (final response) or max iterations reached
+        if (!shouldContinue || stopReason !== "tool_use") {
+          agentState.phase = "complete";
+        }
       }
 
-      // Final update - only send complete if we got the message_stop event
+      // **LOOP COMPLETE** - Save final state and broadcast completion
       const messageIndex = this.messages.findIndex(m => m.id === messageId);
       if (messageIndex !== -1) {
         this.messages[messageIndex].content = accumulatedContent;
         await this.state.storage.put("messages", this.messages);
 
-        if (messageComplete) {
-          this.broadcast(JSON.stringify({
-            type: "complete",
-            messageId: messageId,
-            content: accumulatedContent
-          }));
-        }
+        this.broadcast(JSON.stringify({
+          type: "complete",
+          messageId: messageId,
+          content: accumulatedContent,
+          totalIterations: agentState.iteration
+        }));
       }
 
     } catch (error) {
