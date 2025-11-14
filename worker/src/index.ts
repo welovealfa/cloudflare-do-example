@@ -244,6 +244,7 @@ export class ChatRoom {
 
   async getAIResponse(messageId: string) {
     const MAX_ITERATIONS = 10;
+    let currentMessageId = messageId;
 
     try {
       // Initialize agent loop state
@@ -268,7 +269,6 @@ export class ChatRoom {
       // Get tool definitions
       const tools = this.getToolDefinitions();
 
-      let accumulatedContent = "";
       let shouldContinue = true;
 
       // **AGENT LOOP: Observe → Think → Act → Repeat**
@@ -326,7 +326,7 @@ export class ChatRoom {
         let toolInput = ""; // Accumulate tool input JSON
         const toolUsesInThisIteration: Array<{ id: string; name: string; input: any }> = [];
         let stopReason: string | null = null;
-        let iterationContent = ""; // Content for just this iteration (for conversation history)
+        let iterationContent = ""; // Content for just this iteration
 
         if (reader) {
           while (true) {
@@ -351,18 +351,17 @@ export class ChatRoom {
                   // Handle text content
                   if (parsed.type === "content_block_delta" && parsed.delta?.text) {
                     const textDelta = parsed.delta.text;
-                    accumulatedContent += textDelta;
-                    iterationContent += textDelta; // Track content for this iteration only
+                    iterationContent += textDelta;
 
-                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                    const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
                     if (messageIndex !== -1) {
-                      this.messages[messageIndex].content = accumulatedContent;
+                      this.messages[messageIndex].content = iterationContent;
 
                       // Broadcast update (don't wait for storage on every update)
                       this.broadcast(JSON.stringify({
                         type: "update",
-                        messageId: messageId,
-                        content: accumulatedContent,
+                        messageId: currentMessageId,
+                        content: iterationContent,
                         iteration: agentState.iteration
                       }));
                     }
@@ -373,7 +372,7 @@ export class ChatRoom {
                     toolInput = "";
 
                     // Create a tool use entry with running status
-                    const messageIndex = this.messages.findIndex(m => m.id === messageId);
+                    const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
                     if (messageIndex !== -1) {
                       if (!this.messages[messageIndex].toolUses) {
                         this.messages[messageIndex].toolUses = [];
@@ -389,7 +388,7 @@ export class ChatRoom {
                       // Broadcast tool use started
                       this.broadcast(JSON.stringify({
                         type: "tool_use",
-                        messageId: messageId,
+                        messageId: currentMessageId,
                         iteration: agentState.iteration,
                         toolUse: {
                           id: currentToolUse.id,
@@ -437,7 +436,7 @@ export class ChatRoom {
 
         // Automatically inject validation tool uses for addition operations
         const validationToolUses: Array<{ id: string; name: string; input: any }> = [];
-        const messageIndex = this.messages.findIndex(m => m.id === messageId);
+        const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
 
         for (const toolUse of toolUsesInThisIteration) {
           if (toolUse.name === "calculator" && toolUse.input.operation === "add") {
@@ -472,7 +471,7 @@ export class ChatRoom {
               // Broadcast validation tool started
               this.broadcast(JSON.stringify({
                 type: "tool_use",
-                messageId: messageId,
+                messageId: currentMessageId,
                 iteration: agentState.iteration,
                 toolUse: {
                   id: validationToolUse.id,
@@ -521,15 +520,139 @@ export class ChatRoom {
         console.log(`[Iteration ${agentState.iteration}] toolUsesInThisIteration:`, toolUsesInThisIteration);
 
         if (toolUsesInThisIteration.length > 0) {
+          // If current message has text content, finalize it before executing tools
+          const currentMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
+          if (currentMsgIndex !== -1 && iterationContent && iterationContent.trim()) {
+            await this.state.storage.put("messages", this.messages);
+
+            // Broadcast completion of text message
+            this.broadcast(JSON.stringify({
+              type: "complete",
+              messageId: currentMessageId,
+              content: this.messages[currentMsgIndex].content
+            }));
+
+            // Create new message for tool execution
+            const toolMessageId = crypto.randomUUID();
+            const toolMessage: Message = {
+              id: toolMessageId,
+              role: "assistant",
+              content: "",
+              timestamp: Date.now(),
+              toolUses: []
+            };
+
+            this.messages.push(toolMessage);
+            await this.state.storage.put("messages", this.messages);
+
+            // Broadcast new tool message
+            this.broadcast(JSON.stringify({
+              type: "message",
+              message: toolMessage
+            }));
+
+            // Update currentMessageId to the tool message
+            currentMessageId = toolMessageId;
+
+            // Move tool uses to new message
+            const oldMessageToolUses = this.messages[currentMsgIndex].toolUses || [];
+            this.messages[currentMsgIndex].toolUses = [];
+
+            const newMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
+            if (newMsgIndex !== -1) {
+              this.messages[newMsgIndex].toolUses = oldMessageToolUses;
+
+              // Re-broadcast all tool uses with new messageId
+              for (const toolUse of oldMessageToolUses) {
+                this.broadcast(JSON.stringify({
+                  type: "tool_use",
+                  messageId: currentMessageId,
+                  iteration: agentState.iteration,
+                  toolUse: {
+                    id: toolUse.id,
+                    name: toolUse.name,
+                    input: toolUse.input,
+                    status: toolUse.status
+                  }
+                }));
+              }
+            }
+          }
+
           console.log(`[Iteration ${agentState.iteration}] Executing ${toolUsesInThisIteration.length} tools...`);
 
           // Execute all tools in this iteration
-          for (const toolUse of toolUsesInThisIteration) {
+          for (let toolIndex = 0; toolIndex < toolUsesInThisIteration.length; toolIndex++) {
+            const toolUse = toolUsesInThisIteration[toolIndex];
+
+            // If this is not the first tool, create a new message for it
+            if (toolIndex > 0) {
+              const currentMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
+              if (currentMsgIndex !== -1) {
+                await this.state.storage.put("messages", this.messages);
+
+                // Broadcast completion of previous tool message
+                this.broadcast(JSON.stringify({
+                  type: "complete",
+                  messageId: currentMessageId,
+                  content: this.messages[currentMsgIndex].content
+                }));
+
+                // Create new message for this tool
+                const newToolMessageId = crypto.randomUUID();
+                const newToolMessage: Message = {
+                  id: newToolMessageId,
+                  role: "assistant",
+                  content: "",
+                  timestamp: Date.now(),
+                  toolUses: []
+                };
+
+                this.messages.push(newToolMessage);
+                await this.state.storage.put("messages", this.messages);
+
+                // Broadcast new message
+                this.broadcast(JSON.stringify({
+                  type: "message",
+                  message: newToolMessage
+                }));
+
+                // Update currentMessageId
+                currentMessageId = newToolMessageId;
+
+                // Move this tool use to the new message
+                const oldMsgToolUse = this.messages[currentMsgIndex].toolUses!.find(t => t.id === toolUse.id);
+                if (oldMsgToolUse) {
+                  // Remove from old message
+                  this.messages[currentMsgIndex].toolUses = this.messages[currentMsgIndex].toolUses!.filter(t => t.id !== toolUse.id);
+
+                  // Add to new message
+                  const newMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
+                  if (newMsgIndex !== -1) {
+                    this.messages[newMsgIndex].toolUses!.push(oldMsgToolUse);
+
+                    // Re-broadcast with new messageId
+                    this.broadcast(JSON.stringify({
+                      type: "tool_use",
+                      messageId: currentMessageId,
+                      iteration: agentState.iteration,
+                      toolUse: {
+                        id: oldMsgToolUse.id,
+                        name: oldMsgToolUse.name,
+                        input: oldMsgToolUse.input,
+                        status: oldMsgToolUse.status
+                      }
+                    }));
+                  }
+                }
+              }
+            }
+
             try {
               const result = await this.executeTool(toolUse.name, toolUse.input);
 
               // Update tool use with result
-              const messageIndex = this.messages.findIndex(m => m.id === messageId);
+              const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
               if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
                 const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
                 if (toolUseIndex !== -1) {
@@ -540,7 +663,7 @@ export class ChatRoom {
                   // Broadcast tool use completed
                   this.broadcast(JSON.stringify({
                     type: "tool_use",
-                    messageId: messageId,
+                    messageId: currentMessageId,
                     iteration: agentState.iteration,
                     toolUse: {
                       id: toolUse.id,
@@ -563,14 +686,14 @@ export class ChatRoom {
               console.error("Tool execution error:", error);
 
               // Update tool use with error
-              const messageIndex = this.messages.findIndex(m => m.id === messageId);
+              const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
               if (messageIndex !== -1 && this.messages[messageIndex].toolUses) {
                 const toolUseIndex = this.messages[messageIndex].toolUses!.findIndex(t => t.id === toolUse.id);
                 if (toolUseIndex !== -1) {
                   this.messages[messageIndex].toolUses![toolUseIndex].status = "error";
                   this.broadcast(JSON.stringify({
                     type: "tool_use",
-                    messageId: messageId,
+                    messageId: currentMessageId,
                     iteration: agentState.iteration,
                     toolUse: {
                       id: toolUse.id,
@@ -590,6 +713,40 @@ export class ChatRoom {
             }
           }
 
+          // Finalize current message
+          const finalMsgIndex = this.messages.findIndex(m => m.id === currentMessageId);
+          if (finalMsgIndex !== -1) {
+            await this.state.storage.put("messages", this.messages);
+
+            // Broadcast completion of current message
+            this.broadcast(JSON.stringify({
+              type: "complete",
+              messageId: currentMessageId,
+              content: this.messages[finalMsgIndex].content
+            }));
+          }
+
+          // Create new message for next iteration
+          const newMessageId = crypto.randomUUID();
+          const newMessage: Message = {
+            id: newMessageId,
+            role: "assistant",
+            content: "",
+            timestamp: Date.now()
+          };
+
+          this.messages.push(newMessage);
+          await this.state.storage.put("messages", this.messages);
+
+          // Broadcast new message
+          this.broadcast(JSON.stringify({
+            type: "message",
+            message: newMessage
+          }));
+
+          // Update currentMessageId for next iteration
+          currentMessageId = newMessageId;
+
           // Continue to next iteration with tool results
           shouldContinue = true;
         } else {
@@ -605,15 +762,14 @@ export class ChatRoom {
       }
 
       // **LOOP COMPLETE** - Save final state and broadcast completion
-      const messageIndex = this.messages.findIndex(m => m.id === messageId);
+      const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
       if (messageIndex !== -1) {
-        this.messages[messageIndex].content = accumulatedContent;
         await this.state.storage.put("messages", this.messages);
 
         this.broadcast(JSON.stringify({
           type: "complete",
-          messageId: messageId,
-          content: accumulatedContent,
+          messageId: currentMessageId,
+          content: this.messages[messageIndex].content,
           totalIterations: agentState.iteration
         }));
       }
@@ -622,14 +778,14 @@ export class ChatRoom {
       console.error("Error getting AI response:", error);
 
       // Update with error message
-      const messageIndex = this.messages.findIndex(m => m.id === messageId);
+      const messageIndex = this.messages.findIndex(m => m.id === currentMessageId);
       if (messageIndex !== -1) {
         this.messages[messageIndex].content = "Sorry, I encountered an error processing your request.";
         await this.state.storage.put("messages", this.messages);
 
         this.broadcast(JSON.stringify({
           type: "error",
-          messageId: messageId,
+          messageId: currentMessageId,
           content: this.messages[messageIndex].content
         }));
       }
