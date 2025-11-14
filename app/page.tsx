@@ -78,11 +78,28 @@ export default function ChatPage() {
   // WebSocket URL
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `ws://localhost:8787/default`;
 
-  // Use WebSocket hook
+  // Use WebSocket hook with robust reconnection
   const { sendJsonMessage, lastMessage, readyState } = useWebSocket(wsUrl, {
-    shouldReconnect: () => true,
-    reconnectAttempts: 10,
-    reconnectInterval: 3000,
+    shouldReconnect: (closeEvent) => {
+      console.log('WebSocket closed, attempting reconnect...', closeEvent);
+      return true;
+    },
+    reconnectAttempts: Infinity,
+    reconnectInterval: (attemptNumber) => {
+      // Exponential backoff with max 10 seconds
+      return Math.min(1000 * Math.pow(1.5, attemptNumber), 10000);
+    },
+    onOpen: () => {
+      console.log('WebSocket connected');
+    },
+    onClose: () => {
+      console.log('WebSocket disconnected');
+    },
+    onError: (event) => {
+      console.error('WebSocket error:', event);
+    },
+    retryOnError: true,
+    share: false,
   });
 
   const isConnected = readyState === ReadyState.OPEN;
@@ -109,7 +126,13 @@ export default function ChatPage() {
   useEffect(() => {
     if (!lastMessage) return;
 
-    const data = JSON.parse(lastMessage.data);
+    let data;
+    try {
+      data = JSON.parse(lastMessage.data);
+    } catch (error) {
+      console.error('Failed to parse WebSocket message:', error);
+      return;
+    }
 
       if (data.type === "init") {
         setMessages(data.messages);
@@ -357,13 +380,18 @@ export default function ChatPage() {
       return;
     }
 
-    sendJsonMessage({
-      type: "message",
-      content: inputValue,
-    });
+    try {
+      sendJsonMessage({
+        type: "message",
+        content: inputValue,
+      });
 
-    setInputValue("");
-    setIsLoading(true);
+      setInputValue("");
+      setIsLoading(true);
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      // Don't clear input on error so user can retry
+    }
   }, [inputValue, isConnected, isLoading, sendJsonMessage]);
 
   const AgentLoopIndicator = ({ loopState }: { loopState: Message["agentLoopState"] }) => {
@@ -425,6 +453,8 @@ export default function ChatPage() {
   };
 
   const ToolUseCard = ({ toolUse }: { toolUse: ToolUse }) => {
+    const isLoading = toolUse.status === "running";
+
     const getOperationSymbol = (op: string) => {
       switch (op) {
         case "add": return "+";
@@ -435,51 +465,31 @@ export default function ChatPage() {
       }
     };
 
-    // Extract numeric result from calculator response
-    const extractResult = (result: string): string => {
-      if (!result) return "";
-      // Match "The result of X op Y is Z" pattern and extract Z
-      const match = result.match(/is\s+(-?\d+(?:\.\d+)?)\s*$/);
-      return match ? match[1] : result;
-    };
-
-    // Validation card - different UX
+    // Validation card
     if (toolUse.name === "validate_sum") {
-      const isValid = toolUse.result?.includes("✓");
+      const isValid = toolUse.result?.includes("✓") || toolUse.result?.includes("passed");
+
+      if (isLoading) {
+        return (
+          <div className="tool-use-card validation-card loading">
+            <div className="tool-use-header">
+              <span className="tool-name">Validation</span>
+            </div>
+            <div className="tool-loading">
+              <div className="spinner"></div>
+            </div>
+          </div>
+        );
+      }
 
       return (
-        <div
-          className={`tool-use-card validation-card ${toolUse.status}`}
-          style={{
-            background: isValid ? "#10b98108" : "#ef444408",
-            border: `2px solid ${isValid ? "#10b981" : "#ef4444"}`,
-            borderRadius: "8px",
-            padding: "16px",
-            marginTop: "12px"
-          }}
-        >
-          <div className="tool-use-header" style={{ marginBottom: "8px" }}>
-            <span className="tool-icon" style={{ fontSize: "20px" }}>
-              {isValid ? "✓" : "✗"}
-            </span>
-            <span className="tool-name" style={{
-              fontWeight: 600,
-              color: isValid ? "#10b981" : "#ef4444"
-            }}>
-              Validation
-            </span>
-            <span className={`tool-status tool-status-${toolUse.status}`}>
-              {toolUse.status === "running" && "Running..."}
-              {toolUse.status === "complete" && "Complete"}
-              {toolUse.status === "error" && "Error"}
-            </span>
+        <div className={`tool-use-card validation-card ${isValid ? 'success' : 'error'}`}>
+          <div className="tool-use-header">
+            <span className="tool-name">Validation</span>
+            <span className="tool-badge">{isValid ? "COMPLETE" : "FAILED"}</span>
           </div>
-          {toolUse.status === "complete" && toolUse.result && (
-            <div style={{
-              fontSize: "14px",
-              color: "#374151",
-              lineHeight: "1.5"
-            }}>
+          {toolUse.result && (
+            <div className="tool-use-body">
               {toolUse.result}
             </div>
           )}
@@ -487,27 +497,31 @@ export default function ChatPage() {
       );
     }
 
-    // Calculator card - original UX
-    return (
-      <div className={`tool-use-card ${toolUse.status}`}>
-        <div className="tool-use-header">
-          <span className="tool-icon">🔧</span>
-          <span className="tool-name">Calculator</span>
-          <span className={`tool-status tool-status-${toolUse.status}`}>
-            {toolUse.status === "running" && "Running..."}
-            {toolUse.status === "complete" && "Complete"}
-            {toolUse.status === "error" && "Error"}
-          </span>
+    // Calculator card
+    if (isLoading) {
+      return (
+        <div className="tool-use-card loading">
+          <div className="tool-use-header">
+            <span className="tool-name">Calculator</span>
+          </div>
+          <div className="tool-loading">
+            <div className="spinner"></div>
+          </div>
         </div>
-        {toolUse.status !== "running" && toolUse.input && (
+      );
+    }
+
+    return (
+      <div className="tool-use-card complete">
+        <div className="tool-use-header">
+          <span className="tool-name">Calculator</span>
+          <span className="tool-badge">COMPLETE</span>
+        </div>
+        {toolUse.input && toolUse.result && (
           <div className="tool-use-body">
-            <div className="tool-calculation">
-              <span className="calc-operand">{toolUse.input.a}</span>
-              <span className="calc-operator">{getOperationSymbol(toolUse.input.operation)}</span>
-              <span className="calc-operand">{toolUse.input.b}</span>
-              <span className="calc-equals">=</span>
-              <span className="calc-result">{toolUse.result}</span>
-            </div>
+            <Streamdown>
+              {`${toolUse.input.a} ${getOperationSymbol(toolUse.input.operation)} ${toolUse.input.b} = ${toolUse.result}`}
+            </Streamdown>
           </div>
         )}
       </div>
@@ -591,8 +605,6 @@ export default function ChatPage() {
                     return (
                       <span className="typing-indicator">
                         <span></span>
-                        <span></span>
-                        <span></span>
                       </span>
                     );
                   }
@@ -606,7 +618,7 @@ export default function ChatPage() {
                               <Streamdown>{block.text}</Streamdown>
                             </div>
                           ) : null;
-                        } else if (block.type === "tool_use" && (block.status === "complete" || block.status === "error")) {
+                        } else if (block.type === "tool_use") {
                           return (
                             <ToolUseCard
                               key={block.id}
@@ -615,7 +627,7 @@ export default function ChatPage() {
                                 name: block.name,
                                 input: block.input,
                                 result: block.result,
-                                status: block.status
+                                status: block.status || "running"
                               }}
                             />
                           );

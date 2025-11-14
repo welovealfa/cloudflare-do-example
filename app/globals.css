@@ -97,7 +97,6 @@ body {
     flex: 1;
     overflow-y: auto;
     padding: 2rem 1.5rem;
-    background: #f8f9fa;
 }
 
 .empty-state {
@@ -119,7 +118,7 @@ body {
 
 .message {
     margin-bottom: 10px;
-    padding: 1rem 1.25rem;
+    padding: 12px;
     border-radius: 12px;
     animation: slideIn 0.3s ease-out;
     max-width: 85%;
@@ -187,35 +186,24 @@ body {
 /* Typing Indicator */
 .typing-indicator {
     display: inline-flex;
-    gap: 4px;
     align-items: center;
     padding: 0.5rem 0;
 }
 
 .typing-indicator span {
-    width: 8px;
-    height: 8px;
+    width: 12px;
+    height: 12px;
     border-radius: 50%;
-    background: #667eea;
-    animation: bounce 1.4s infinite ease-in-out both;
+    background: #333;
+    animation: flash 1.5s ease-in-out infinite;
 }
 
-.typing-indicator span:nth-child(1) {
-    animation-delay: -0.32s;
-}
-
-.typing-indicator span:nth-child(2) {
-    animation-delay: -0.16s;
-}
-
-@keyframes bounce {
-    0%, 80%, 100% {
-        transform: scale(0);
-        opacity: 0.5;
-    }
-    40% {
-        transform: scale(1);
+@keyframes flash {
+    0%, 100% {
         opacity: 1;
+    }
+    50% {
+        opacity: 0.2;
     }
 }
 
@@ -241,143 +229,95 @@ body {
 }
 
 .tool-use-card {
-    background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+    background: white;
     border-radius: 12px;
-    padding: 1rem;
+    padding: 1.25rem;
     margin-top: 20px;
     margin-bottom: 20px;
-    border: 2px solid #e0e7ff;
-    animation: toolSlideIn 0.3s ease-out;
+    border: 2px solid #e5e7eb;
+    transition: all 0.3s ease;
 }
 
-@keyframes toolSlideIn {
-    from {
-        opacity: 0;
-        transform: translateX(-10px);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(0);
-    }
+.tool-use-card.loading {
+    border-color: #d1d5db;
 }
 
 .tool-use-card.complete {
-    background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%);
-    border-color: #4caf50;
+    border-color: #10b981;
 }
 
-.tool-use-card.error {
-    background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%);
-    border-color: #f44336;
+.tool-use-card.validation-card.success {
+    border-color: #10b981;
 }
 
-.tool-use-card.running {
-    background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%);
-    border-color: #ff9800;
-    animation: pulse 2s ease-in-out infinite;
-}
-
-@keyframes pulse {
-    0%, 100% {
-        opacity: 1;
-    }
-    50% {
-        opacity: 0.8;
-    }
+.tool-use-card.validation-card.error {
+    border-color: #ef4444;
 }
 
 .tool-use-header {
     display: flex;
     align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 0.75rem;
+    justify-content: space-between;
+    margin-bottom: 0;
     font-weight: 600;
     color: #333;
-}
-
-.tool-icon {
-    font-size: 1.25rem;
 }
 
 .tool-name {
-    flex: 1;
-    font-size: 0.95rem;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: #6b7280;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
 }
 
-.tool-status {
+.tool-badge {
     font-size: 0.75rem;
     padding: 0.25rem 0.75rem;
     border-radius: 12px;
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
     letter-spacing: 0.5px;
-}
-
-.tool-status-running {
-    background: #ff9800;
+    background: #10b981;
     color: white;
 }
 
-.tool-status-complete {
-    background: #4caf50;
-    color: white;
+.tool-use-card.validation-card.error .tool-badge {
+    background: #ef4444;
 }
 
-.tool-status-error {
-    background: #f44336;
-    color: white;
+.tool-loading {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    padding: 3rem 0;
+}
+
+.spinner {
+    width: 24px;
+    height: 24px;
+    border: 3px solid #e5e7eb;
+    border-top-color: #333;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
 }
 
 .tool-use-body {
-    background: rgba(255, 255, 255, 0.8);
+    background: #f9fafb;
     border-radius: 8px;
     padding: 1rem;
-}
-
-.tool-calculation {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 1rem;
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: #333;
-    font-family: 'Courier New', monospace;
-}
-
-.calc-operand {
-    color: #667eea;
-    font-size: 1.75rem;
-}
-
-.calc-operator {
-    color: #764ba2;
-    font-size: 1.5rem;
-    font-weight: 700;
-}
-
-.calc-equals {
-    color: #999;
-    font-size: 1.5rem;
-}
-
-.calc-result {
-    color: #4caf50;
-    font-size: 2rem;
-    font-weight: 700;
-    padding: 0.25rem 0.75rem;
-    background: rgba(76, 175, 80, 0.1);
-    border-radius: 8px;
-}
-
-.loading-indicator {
-    text-align: center;
-    color: #999;
+    margin-top: 1rem;
     font-size: 0.875rem;
-    font-style: italic;
-    margin-top: -0.5rem;
-    margin-bottom: 1rem;
+    color: #374151;
+    line-height: 1.6;
 }
+
 
 /* Input Form */
 .input-form {
@@ -390,21 +330,21 @@ body {
 
 .input-form input {
     flex: 1;
-    padding: 1rem 1.25rem;
-    border: 2px solid #e0e0e0;
-    border-radius: 24px;
+    padding: 0.875rem 1rem;
+    border: 1px solid #d1d5db;
+    border-radius: 26px;
     font-size: 1rem;
-    transition: border-color 0.3s, box-shadow 0.3s;
+    transition: border-color 0.2s;
+    background: white;
 }
 
 .input-form input:focus {
     outline: none;
-    border-color: #667eea;
-    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+    border-color: #9ca3af;
 }
 
 .input-form input:disabled {
-    background: #f5f5f5;
+    background: #f9fafb;
     cursor: not-allowed;
 }
 

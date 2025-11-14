@@ -1,5 +1,5 @@
 import type { DurableObjectState, WebSocket as CloudflareWebSocket } from "@cloudflare/workers-types";
-import { createToolRegistry, getToolDefinitions, executeTool, checkAutoInjectValidation, type Tool } from "./tools";
+import { createToolRegistry, getToolDefinitions, executeTool, type Tool } from "./tools";
 
 export interface Env {
   ANTHROPIC_API_KEY: string;
@@ -385,7 +385,7 @@ export class ChatRoom {
             messages: conversationHistory,
             tools,
             stream: true,
-            system: "You are a helpful assistant with access to tools. Use tools when needed to provide accurate responses. When using tools, explain your reasoning."
+            system: "You are a helpful assistant with access to tools. Use tools when needed to provide accurate responses. IMPORTANT: After using the calculator tool, you MUST always call the validate_sum tool to verify the calculation is correct before responding to the user."
           })
         });
 
@@ -424,32 +424,14 @@ export class ChatRoom {
           return; // Exit early instead of break to avoid double-broadcast
         }
 
-        // Automatically inject validation tool uses where applicable
-        const validationToolUses: Array<{ id: string; name: string; input: unknown }> = [];
+        console.log(`[Iteration ${iteration}] Executing ${toolUses.length} tools...`);
 
-        for (const toolUse of toolUses) {
-          const validationCheck = checkAutoInjectValidation(this.tools, toolUse.name, toolUse.input);
-
-          if (validationCheck && validationCheck.shouldInject && validationCheck.validationToolName) {
-            validationToolUses.push({
-              id: crypto.randomUUID(),
-              name: validationCheck.validationToolName,
-              input: validationCheck.validationInput
-            });
-            console.log(`[Iteration ${iteration}] Auto-injecting validation for ${toolUse.name}`);
-          }
-        }
-
-        // Combine regular and validation tool uses
-        const allToolUses = [...toolUses, ...validationToolUses];
-        console.log(`[Iteration ${iteration}] Executing ${allToolUses.length} tools...`);
-
-        // Build assistant content blocks for conversation history (with ALL tool uses)
+        // Build assistant content blocks for conversation history
         const assistantContent: ContentBlock[] = [];
         if (textContent) {
           assistantContent.push({ type: "text", text: textContent });
         }
-        for (const toolUse of allToolUses) {
+        for (const toolUse of toolUses) {
           assistantContent.push({
             type: "tool_use",
             id: toolUse.id,
@@ -464,8 +446,8 @@ export class ChatRoom {
           content: assistantContent
         });
 
-        // Execute all tools (adds them to current message as tool_use blocks)
-        const toolResults = await this.executeTools(allToolUses, messageId, iteration);
+        // Execute tools (adds them to current message as tool_use blocks)
+        const toolResults = await this.executeTools(toolUses, messageId, iteration);
 
         // Save and finalize message with all tool results
         await this.saveMessages();
