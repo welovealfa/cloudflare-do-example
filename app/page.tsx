@@ -4,6 +4,12 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import useWebSocket, { ReadyState } from "react-use-websocket";
 import { Streamdown } from "streamdown";
 
+// Content blocks match backend structure
+type ContentBlock =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: unknown; status?: "running" | "complete" | "error"; result?: string }
+  | { type: "tool_result"; tool_use_id: string; content: string };
+
 interface ToolUse {
   id: string;
   name: string;
@@ -15,7 +21,7 @@ interface ToolUse {
 interface Message {
   id: string;
   role: "user" | "assistant";
-  content: string;
+  content: ContentBlock[];
   timestamp: number;
   toolUses?: ToolUse[];
   agentLoopState?: {
@@ -29,6 +35,32 @@ interface Message {
     }>;
     retryCount?: number;
   };
+}
+
+// Helper: Extract text content from ContentBlocks
+function getTextContent(content: ContentBlock[] | string): string {
+  if (typeof content === "string") return content; // Backward compatibility
+  if (!Array.isArray(content)) return "";
+
+  return content
+    .filter((block): block is Extract<ContentBlock, { type: "text" }> => block.type === "text")
+    .map(block => block.text)
+    .join("\n");
+}
+
+// Helper: Extract tool uses from ContentBlocks
+function getToolUses(content: ContentBlock[]): ToolUse[] {
+  if (!Array.isArray(content)) return [];
+
+  return content
+    .filter((block): block is Extract<ContentBlock, { type: "tool_use" }> => block.type === "tool_use")
+    .map(block => ({
+      id: block.id,
+      name: block.name,
+      input: block.input,
+      result: block.result,
+      status: block.status || "running"
+    }));
 }
 
 export default function ChatPage() {
@@ -86,12 +118,12 @@ export default function ChatPage() {
 
     setMessages((prev) => {
       const updated = [...prev];
-      updates.forEach((content, messageId) => {
+      updates.forEach((content: any, messageId) => {
         const index = updated.findIndex(m => m.id === messageId);
         if (index !== -1) {
           updated[index] = {
             ...updated[index],
-            content
+            content: content as ContentBlock[]
           };
         }
       });
@@ -100,8 +132,8 @@ export default function ChatPage() {
   }, []);
 
   // Throttled update handler - batches updates every 50ms
-  const scheduleUpdate = useCallback((messageId: string, content: string) => {
-    pendingUpdatesRef.current.set(messageId, content);
+  const scheduleUpdate = useCallback((messageId: string, content: ContentBlock[]) => {
+    pendingUpdatesRef.current.set(messageId, content as any); // Store ContentBlock[] instead of string
 
     if (updateTimerRef.current) {
       return; // Already scheduled
@@ -373,10 +405,6 @@ export default function ChatPage() {
     setIsLoading(true);
   }, [inputValue, isConnected, isLoading, sendJsonMessage]);
 
-  const formatTime = (timestamp: number) => {
-    return new Date(timestamp).toLocaleTimeString();
-  };
-
   const AgentLoopIndicator = ({ loopState }: { loopState: Message["agentLoopState"] }) => {
     // Don't show the indicator anymore
     return null;
@@ -444,6 +472,14 @@ export default function ChatPage() {
         case "divide": return "÷";
         default: return op;
       }
+    };
+
+    // Extract numeric result from calculator response
+    const extractResult = (result: string): string => {
+      if (!result) return "";
+      // Match "The result of X op Y is Z" pattern and extract Z
+      const match = result.match(/is\s+(-?\d+(?:\.\d+)?)\s*$/);
+      return match ? match[1] : result;
     };
 
     // Validation card - different UX
@@ -584,40 +620,53 @@ export default function ChatPage() {
               key={msg.id}
               className={`message ${msg.role === "user" ? "user-message" : "assistant-message"}`}
             >
-              <div className="message-header">
-                <span className="message-role">
-                  {msg.role === "user" ? "You" : "Claude"}
-                </span>
-                <span className="message-time">{formatTime(msg.timestamp)}</span>
-              </div>
               <div className="message-content">
                 {msg.role === "assistant" && msg.agentLoopState && (
                   <AgentLoopIndicator loopState={msg.agentLoopState} />
                 )}
-                {msg.content && msg.content.trim() && (
-                  <div className="message-text">
-                    <Streamdown>{msg.content}</Streamdown>
-                  </div>
-                )}
-                {msg.toolUses && msg.toolUses.length > 0 && (
-                  <div className="tool-uses-container">
-                    {msg.toolUses
-                      .filter((toolUse) => toolUse.status === "complete" || toolUse.status === "error")
-                      .map((toolUse) => (
-                        <ToolUseCard key={toolUse.id} toolUse={toolUse} />
-                      ))}
-                  </div>
-                )}
-                {msg.role === "assistant" && msg.agentLoopState?.validationResults && (
-                  <ValidationResults validationResults={msg.agentLoopState.validationResults} />
-                )}
-                {!msg.content && (!msg.toolUses || msg.toolUses.length === 0) && (
-                  <span className="typing-indicator">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                  </span>
-                )}
+                {(() => {
+                  // Render content blocks in order
+                  if (!msg.content || msg.content.length === 0) {
+                    return (
+                      <span className="typing-indicator">
+                        <span></span>
+                        <span></span>
+                        <span></span>
+                      </span>
+                    );
+                  }
+
+                  return (
+                    <>
+                      {msg.content.map((block, index) => {
+                        if (block.type === "text") {
+                          return block.text && block.text.trim() ? (
+                            <div key={index} className="message-text">
+                              <Streamdown>{block.text}</Streamdown>
+                            </div>
+                          ) : null;
+                        } else if (block.type === "tool_use" && (block.status === "complete" || block.status === "error")) {
+                          return (
+                            <ToolUseCard
+                              key={block.id}
+                              toolUse={{
+                                id: block.id,
+                                name: block.name,
+                                input: block.input,
+                                result: block.result,
+                                status: block.status
+                              }}
+                            />
+                          );
+                        }
+                        return null;
+                      })}
+                      {msg.role === "assistant" && msg.agentLoopState?.validationResults && (
+                        <ValidationResults validationResults={msg.agentLoopState.validationResults} />
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           ))
@@ -631,11 +680,17 @@ export default function ChatPage() {
       <form onSubmit={sendMessage} className="input-form">
         <input
           type="text"
-          placeholder="Ask Claude anything..."
+          placeholder={isConnected ? "Ask Claude anything..." : "Connecting..."}
           value={inputValue}
           onChange={(e) => setInputValue(e.target.value)}
-          disabled={!isConnected || isLoading}
+          disabled={isLoading}
           autoFocus
+          onKeyDown={(e) => {
+            // Allow typing even when not connected - user can prepare message
+            if (e.key === 'Enter' && (!isConnected || isLoading)) {
+              e.preventDefault();
+            }
+          }}
         />
         <button type="submit" disabled={!inputValue.trim() || !isConnected || isLoading}>
           {isLoading ? "Sending..." : "Send"}
