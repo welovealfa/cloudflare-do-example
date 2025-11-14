@@ -353,53 +353,8 @@ export default function ChatPage() {
   };
 
   const AgentLoopIndicator = ({ loopState }: { loopState: Message["agentLoopState"] }) => {
-    if (!loopState) return null;
-
-    const getPhaseLabel = (phase: string) => {
-      switch (phase) {
-        case "observe": return "🔍 Observing";
-        case "think": return "🤔 Thinking";
-        case "act": return "⚡ Acting";
-        case "validate": return "✓ Validating";
-        case "complete": return "✅ Complete";
-        default: return phase;
-      }
-    };
-
-    const getPhaseColor = (phase: string) => {
-      switch (phase) {
-        case "observe": return "#3b82f6";
-        case "think": return "#8b5cf6";
-        case "act": return "#10b981";
-        case "validate": return "#f59e0b";
-        case "complete": return "#6b7280";
-        default: return "#6b7280";
-      }
-    };
-
-    return (
-      <div className="agent-loop-indicator" style={{
-        background: `${getPhaseColor(loopState.phase)}15`,
-        borderLeft: `3px solid ${getPhaseColor(loopState.phase)}`,
-        padding: "8px 12px",
-        marginBottom: "8px",
-        borderRadius: "4px",
-        fontSize: "13px",
-        color: getPhaseColor(loopState.phase)
-      }}>
-        <span style={{ fontWeight: 600 }}>
-          Iteration {loopState.currentIteration}
-          {loopState.totalIterations && ` of ${loopState.totalIterations}`}
-          {loopState.retryCount && loopState.retryCount > 0 && (
-            <span style={{ marginLeft: "8px", fontSize: "12px", opacity: 0.8 }}>
-              (Retry {loopState.retryCount})
-            </span>
-          )}
-        </span>
-        {" • "}
-        <span>{getPhaseLabel(loopState.phase)}</span>
-      </div>
-    );
+    // Don't show the indicator anymore
+    return null;
   };
 
   const ValidationResults = ({ validationResults }: {
@@ -466,6 +421,51 @@ export default function ChatPage() {
       }
     };
 
+    // Validation card - different UX
+    if (toolUse.name === "validate_sum") {
+      const isValid = toolUse.result?.includes("✓");
+
+      return (
+        <div
+          className={`tool-use-card validation-card ${toolUse.status}`}
+          style={{
+            background: isValid ? "#10b98108" : "#ef444408",
+            border: `2px solid ${isValid ? "#10b981" : "#ef4444"}`,
+            borderRadius: "8px",
+            padding: "16px",
+            marginTop: "12px"
+          }}
+        >
+          <div className="tool-use-header" style={{ marginBottom: "8px" }}>
+            <span className="tool-icon" style={{ fontSize: "20px" }}>
+              {isValid ? "✓" : "✗"}
+            </span>
+            <span className="tool-name" style={{
+              fontWeight: 600,
+              color: isValid ? "#10b981" : "#ef4444"
+            }}>
+              Validation
+            </span>
+            <span className={`tool-status tool-status-${toolUse.status}`}>
+              {toolUse.status === "running" && "Running..."}
+              {toolUse.status === "complete" && "Complete"}
+              {toolUse.status === "error" && "Error"}
+            </span>
+          </div>
+          {toolUse.status === "complete" && toolUse.result && (
+            <div style={{
+              fontSize: "14px",
+              color: "#374151",
+              lineHeight: "1.5"
+            }}>
+              {toolUse.result}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Calculator card - original UX
     return (
       <div className={`tool-use-card ${toolUse.status}`}>
         <div className="tool-use-header">

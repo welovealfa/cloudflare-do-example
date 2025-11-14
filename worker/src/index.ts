@@ -169,6 +169,28 @@ export class ChatRoom {
           },
           required: ["operation", "a", "b"]
         }
+      },
+      {
+        name: "validate_sum",
+        description: "Validates that a sum (addition) calculation is correct by checking the inputs and expected result.",
+        input_schema: {
+          type: "object",
+          properties: {
+            a: {
+              type: "number",
+              description: "The first number in the sum"
+            },
+            b: {
+              type: "number",
+              description: "The second number in the sum"
+            },
+            expected_result: {
+              type: "number",
+              description: "The expected result of a + b"
+            }
+          },
+          required: ["a", "b", "expected_result"]
+        }
       }
     ];
   }
@@ -184,6 +206,24 @@ export class ChatRoom {
     }
   }
 
+  // Validation tool for sum operations
+  validateSum(a: number, b: number, expectedResult: number): { isValid: boolean; message: string } {
+    const actualResult = a + b;
+    const isValid = actualResult === expectedResult;
+
+    if (isValid) {
+      return {
+        isValid: true,
+        message: `✓ Validation passed: ${a} + ${b} = ${expectedResult} is correct`
+      };
+    } else {
+      return {
+        isValid: false,
+        message: `✗ Validation failed: ${a} + ${b} = ${actualResult}, but expected ${expectedResult}`
+      };
+    }
+  }
+
   // Execute a single tool
   private async executeTool(toolName: string, toolInput: any): Promise<string> {
     try {
@@ -191,6 +231,9 @@ export class ChatRoom {
         case "calculator":
           const result = this.calculate(toolInput.operation, toolInput.a, toolInput.b);
           return `The result of ${toolInput.a} ${toolInput.operation} ${toolInput.b} is ${result}`;
+        case "validate_sum":
+          const validation = this.validateSum(toolInput.a, toolInput.b, toolInput.expected_result);
+          return validation.message;
         default:
           throw new Error(`Unknown tool: ${toolName}`);
       }
@@ -232,14 +275,6 @@ export class ChatRoom {
       while (shouldContinue && agentState.iteration < MAX_ITERATIONS) {
         agentState.iteration++;
 
-        // Broadcast iteration start
-        this.broadcast(JSON.stringify({
-          type: "agent_iteration",
-          messageId: messageId,
-          iteration: agentState.iteration,
-          phase: "observe"
-        }));
-
         // **PHASE 1: OBSERVE** - Prepare messages for this iteration
         agentState.phase = "observe";
         const messagesToSend: any[] = [...agentState.conversationHistory];
@@ -255,22 +290,8 @@ export class ChatRoom {
           agentState.toolResults = [];
         }
 
-        // Broadcast observation
-        this.broadcast(JSON.stringify({
-          type: "agent_observation",
-          messageId: messageId,
-          iteration: agentState.iteration,
-          observations: messagesToSend.length
-        }));
-
         // **PHASE 2: THINK** - Call Claude API
         agentState.phase = "think";
-
-        this.broadcast(JSON.stringify({
-          type: "agent_thinking",
-          messageId: messageId,
-          iteration: agentState.iteration
-        }));
 
         const response = await fetch("https://api.anthropic.com/v1/messages", {
           method: "POST",
@@ -414,6 +435,59 @@ export class ChatRoom {
           }
         }
 
+        // Automatically inject validation tool uses for addition operations
+        const validationToolUses: Array<{ id: string; name: string; input: any }> = [];
+        const messageIndex = this.messages.findIndex(m => m.id === messageId);
+
+        for (const toolUse of toolUsesInThisIteration) {
+          if (toolUse.name === "calculator" && toolUse.input.operation === "add") {
+            const calculatedResult = this.calculate(toolUse.input.operation, toolUse.input.a, toolUse.input.b);
+            const validationToolUse = {
+              id: crypto.randomUUID(),
+              name: "validate_sum",
+              input: {
+                a: toolUse.input.a,
+                b: toolUse.input.b,
+                expected_result: calculatedResult
+              }
+            };
+
+            console.log(`[Iteration ${agentState.iteration}] Auto-injecting validation for sum: ${toolUse.input.a} + ${toolUse.input.b} = ${calculatedResult}`);
+
+            validationToolUses.push(validationToolUse);
+
+            // Add validation tool use to message with "running" status
+            if (messageIndex !== -1) {
+              if (!this.messages[messageIndex].toolUses) {
+                this.messages[messageIndex].toolUses = [];
+              }
+              this.messages[messageIndex].toolUses!.push({
+                id: validationToolUse.id,
+                name: "validate_sum",
+                input: validationToolUse.input,
+                result: null,
+                status: "running"
+              });
+
+              // Broadcast validation tool started
+              this.broadcast(JSON.stringify({
+                type: "tool_use",
+                messageId: messageId,
+                iteration: agentState.iteration,
+                toolUse: {
+                  id: validationToolUse.id,
+                  name: "validate_sum",
+                  input: validationToolUse.input,
+                  status: "running"
+                }
+              }));
+            }
+          }
+        }
+
+        // Add validation tool uses to the iteration
+        toolUsesInThisIteration.push(...validationToolUses);
+
         // Add the assistant's response to conversation history
         // This is required by Anthropic API before we can send tool_results
         if (toolUsesInThisIteration.length > 0 || iterationContent) {
@@ -444,17 +518,9 @@ export class ChatRoom {
           });
         }
 
-        // Broadcast action phase with tool executions
         console.log(`[Iteration ${agentState.iteration}] toolUsesInThisIteration:`, toolUsesInThisIteration);
 
         if (toolUsesInThisIteration.length > 0) {
-          this.broadcast(JSON.stringify({
-            type: "agent_action",
-            messageId: messageId,
-            iteration: agentState.iteration,
-            toolCount: toolUsesInThisIteration.length
-          }));
-
           console.log(`[Iteration ${agentState.iteration}] Executing ${toolUsesInThisIteration.length} tools...`);
 
           // Execute all tools in this iteration
