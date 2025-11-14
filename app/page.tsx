@@ -75,10 +75,6 @@ export default function ChatPage() {
   } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // Throttling refs for streaming updates
-  const pendingUpdatesRef = useRef<Map<string, string>>(new Map());
-  const updateTimerRef = useRef<NodeJS.Timeout | null>(null);
-
   // WebSocket URL
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `ws://localhost:8787/default`;
 
@@ -109,42 +105,6 @@ export default function ChatPage() {
     };
   }, [messages]);
 
-  // Flush all pending streaming updates
-  const flushPendingUpdates = useCallback(() => {
-    if (pendingUpdatesRef.current.size === 0) return;
-
-    const updates = new Map(pendingUpdatesRef.current);
-    pendingUpdatesRef.current.clear();
-
-    setMessages((prev) => {
-      const updated = [...prev];
-      updates.forEach((content: any, messageId) => {
-        const index = updated.findIndex(m => m.id === messageId);
-        if (index !== -1) {
-          updated[index] = {
-            ...updated[index],
-            content: content as ContentBlock[]
-          };
-        }
-      });
-      return updated;
-    });
-  }, []);
-
-  // Throttled update handler - batches updates every 50ms
-  const scheduleUpdate = useCallback((messageId: string, content: ContentBlock[]) => {
-    pendingUpdatesRef.current.set(messageId, content as any); // Store ContentBlock[] instead of string
-
-    if (updateTimerRef.current) {
-      return; // Already scheduled
-    }
-
-    updateTimerRef.current = setTimeout(() => {
-      flushPendingUpdates();
-      updateTimerRef.current = null;
-    }, 50);
-  }, [flushPendingUpdates]);
-
   // Handle incoming WebSocket messages
   useEffect(() => {
     if (!lastMessage) return;
@@ -164,15 +124,19 @@ export default function ChatPage() {
           setIsLoading(true);
         }
       } else if (data.type === "update") {
-        // Use throttled update for streaming messages
-        scheduleUpdate(data.messageId, data.content);
+        // Update messages directly without throttling
+        setMessages((prev) => {
+          const updated = [...prev];
+          const index = updated.findIndex(m => m.id === data.messageId);
+          if (index !== -1) {
+            updated[index] = {
+              ...updated[index],
+              content: data.content
+            };
+          }
+          return updated;
+        });
       } else if (data.type === "complete") {
-        // Flush any pending updates before completing
-        if (updateTimerRef.current) {
-          clearTimeout(updateTimerRef.current);
-          updateTimerRef.current = null;
-        }
-        flushPendingUpdates();
         // Finalize assistant message
         setMessages((prev) => {
           const updated = [...prev];
@@ -375,14 +339,11 @@ export default function ChatPage() {
           return updated;
         });
       }
-  }, [lastMessage, scheduleUpdate, flushPendingUpdates]);
+  }, [lastMessage]);
 
-  // Cleanup throttle timers on unmount
+  // Cleanup scroll timer on unmount
   useEffect(() => {
     return () => {
-      if (updateTimerRef.current) {
-        clearTimeout(updateTimerRef.current);
-      }
       if (scrollTimerRef.current) {
         clearTimeout(scrollTimerRef.current);
       }
@@ -670,9 +631,6 @@ export default function ChatPage() {
               </div>
             </div>
           ))
-        )}
-        {isLoading && messages[messages.length - 1]?.role === "assistant" && (
-          <div className="loading-indicator">Claude is typing...</div>
         )}
         <div ref={messagesEndRef} />
       </div>

@@ -402,11 +402,26 @@ export class ChatRoom {
           iteration
         );
 
+        // Save message after streaming completes
+        await this.saveMessages();
+
         // Check if we need to continue (tools were used)
         if (toolUses.length === 0) {
           // No tools - final response complete
           console.log(`[Iteration ${iteration}] Complete (no tools used)`);
-          break;
+
+          // Broadcast final completion
+          const messageIndex = this.messages.findIndex(m => m.id === messageId);
+          if (messageIndex !== -1) {
+            this.broadcastUpdate({
+              type: "complete",
+              messageId,
+              content: this.messages[messageIndex].content,
+              totalIterations: iteration
+            });
+          }
+
+          return; // Exit early instead of break to avoid double-broadcast
         }
 
         // Automatically inject validation tool uses where applicable
