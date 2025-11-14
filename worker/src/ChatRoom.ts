@@ -17,6 +17,9 @@ interface Message {
   content: ContentBlock[];
   timestamp: number;
   iteration?: number;
+  startTime?: number;
+  endTime?: number;
+  durationSeconds?: number;
 }
 
 interface ToolResult {
@@ -103,6 +106,7 @@ export class ChatRoom {
 
         // Create placeholder for assistant response
         const assistantMessage = this.createAssistantMessage();
+        assistantMessage.startTime = Date.now();
         this.messages.push(assistantMessage);
         await this.saveMessages();
 
@@ -155,6 +159,7 @@ export class ChatRoom {
     content?: ContentBlock[];
     iteration?: number;
     totalIterations?: number;
+    durationSeconds?: number;
     error?: string;
   }) {
     this.broadcast(JSON.stringify(payload));
@@ -167,7 +172,18 @@ export class ChatRoom {
       .filter(m => m.content.length > 0)
       .map(m => ({
         role: m.role,
-        content: m.content
+        content: m.content.map(block => {
+          // Sanitize tool_use blocks - remove internal status and result fields
+          if (block.type === "tool_use") {
+            return {
+              type: "tool_use",
+              id: block.id,
+              name: block.name,
+              input: block.input
+            };
+          }
+          return block;
+        })
       }));
   }
 
@@ -413,11 +429,19 @@ export class ChatRoom {
           // Broadcast final completion
           const messageIndex = this.messages.findIndex(m => m.id === messageId);
           if (messageIndex !== -1) {
+            const message = this.messages[messageIndex];
+            message.endTime = Date.now();
+            if (message.startTime) {
+              message.durationSeconds = Math.floor((message.endTime - message.startTime) / 1000);
+            }
+            await this.saveMessages();
+
             this.broadcastUpdate({
               type: "complete",
               messageId,
-              content: this.messages[messageIndex].content,
-              totalIterations: iteration
+              content: message.content,
+              totalIterations: iteration,
+              durationSeconds: message.durationSeconds
             });
           }
 
@@ -469,14 +493,23 @@ export class ChatRoom {
       }
 
       // Save final state and broadcast completion
+      const messageIndex = this.messages.findIndex(m => m.id === messageId);
+      if (messageIndex !== -1) {
+        const message = this.messages[messageIndex];
+        message.endTime = Date.now();
+        if (message.startTime) {
+          message.durationSeconds = Math.floor((message.endTime - message.startTime) / 1000);
+        }
+      }
+
       await this.saveMessages();
 
-      const messageIndex = this.messages.findIndex(m => m.id === messageId);
       if (messageIndex !== -1) {
         this.broadcastUpdate({
           type: "complete",
           messageId,
-          content: this.messages[messageIndex].content
+          content: this.messages[messageIndex].content,
+          durationSeconds: this.messages[messageIndex].durationSeconds
         });
       }
 

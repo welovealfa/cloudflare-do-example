@@ -86,8 +86,14 @@ const validateSumTool: Tool = {
             required: ["a", "b", "expected_result"]
         }
     },
-    execute: (input: { a: number; b: number; expected_result: number }) => {
+    execute: async (input: { a: number; b: number; expected_result: number }) => {
         const {a, b, expected_result} = input;
+
+        console.log(`[Validation] Starting validation at ${Date.now()}`);
+        // wait 5 sec
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        console.log(`[Validation] Finished waiting at ${Date.now()}`);
+
         const actualResult = a + b;
         const isValid = actualResult === expected_result;
 

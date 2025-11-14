@@ -23,6 +23,7 @@ interface Message {
   role: "user" | "assistant";
   content: ContentBlock[];
   timestamp: number;
+  durationSeconds?: number;
   toolUses?: ToolUse[];
   agentLoopState?: {
     currentIteration: number;
@@ -74,6 +75,7 @@ export default function ChatPage() {
     phase: string;
   } | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
 
   // WebSocket URL
   const wsUrl = process.env.NEXT_PUBLIC_WS_URL || `ws://localhost:8787/default`;
@@ -168,6 +170,7 @@ export default function ChatPage() {
             updated[index] = {
               ...updated[index],
               content: data.content,
+              durationSeconds: data.durationSeconds,
               agentLoopState: {
                 currentIteration: updated[index].agentLoopState?.currentIteration || data.totalIterations,
                 phase: "complete",
@@ -372,6 +375,27 @@ export default function ChatPage() {
       }
     };
   }, []);
+
+  // Auto-focus input when loading completes
+  useEffect(() => {
+    if (!isLoading && inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, [isLoading]);
+
+  // Format duration for display
+  const formatDuration = (durationSeconds?: number): string => {
+    if (!durationSeconds) return "";
+
+    const minutes = Math.floor(durationSeconds / 60);
+    const seconds = durationSeconds % 60;
+
+    if (minutes > 0) {
+      return `Took ${minutes} minute${minutes !== 1 ? 's' : ''} ${seconds} second${seconds !== 1 ? 's' : ''}`;
+    } else {
+      return `Took ${seconds} second${seconds !== 1 ? 's' : ''}`;
+    }
+  };
 
   const sendMessage = useCallback((e: React.FormEvent) => {
     e.preventDefault();
@@ -641,6 +665,11 @@ export default function ChatPage() {
                   );
                 })()}
               </div>
+              {msg.role === "assistant" && msg.durationSeconds && (
+                <div className="message-duration">
+                  {formatDuration(msg.durationSeconds)}
+                </div>
+              )}
             </div>
           ))
         )}
@@ -649,6 +678,7 @@ export default function ChatPage() {
 
       <form onSubmit={sendMessage} className="input-form">
         <input
+          ref={inputRef}
           type="text"
           placeholder={isConnected ? "Ask Claude anything..." : "Connecting..."}
           value={inputValue}

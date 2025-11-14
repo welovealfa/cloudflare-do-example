@@ -183,6 +183,12 @@ body {
     white-space: pre-wrap;
 }
 
+.message-duration {
+    font-size: 0.75rem;
+    color: #9ca3af;
+    margin-top: 0.5rem;
+}
+
 /* Typing Indicator */
 .typing-indicator {
     display: inline-flex;
